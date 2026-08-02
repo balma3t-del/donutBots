@@ -92,6 +92,22 @@ export class SessionManager {
     return { offline: false, text: session.formatNearbyList(), count: list.length };
   }
 
+  isHoldingRmb(botId: number): boolean {
+    return Boolean(this.sessions.get(botId)?.isHoldingRmb);
+  }
+
+  holdRmb(botId: number): 'ok' | 'offline' | 'already' | 'fail' {
+    const session = this.sessions.get(botId);
+    if (!session) return 'offline';
+    return session.holdRmb();
+  }
+
+  releaseRmb(botId: number): 'ok' | 'offline' | 'not_holding' | 'fail' {
+    const session = this.sessions.get(botId);
+    if (!session) return 'offline';
+    return session.releaseRmb(true);
+  }
+
   /** После обновления конфига — выключить, чтобы при следующем старте взялись новые данные. */
   invalidate(botId: number) {
     const session = this.sessions.get(botId);

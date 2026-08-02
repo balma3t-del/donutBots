@@ -52,6 +52,9 @@ function botCardText(bot: BotRecord, manager: SessionManager): string {
     `Автореконнект: ${bot.reconnect ? 'вкл' : 'выкл'}`,
   ];
   if (session?.inGameName) lines.splice(3, 0, `Ник: <b>${session.inGameName}</b>`);
+  if (status === 'online') {
+    lines.push(`ПКМ: ${session?.isHoldingRmb ? 'зажат' : 'не зажат'}`);
+  }
   return lines.join('\n');
 }
 
@@ -69,8 +72,15 @@ function botActionsKeyboard(bot: BotRecord, manager: SessionManager): InlineKeyb
   kb.row()
     .text('Отправить в чат', `bot:${bot.id}:chat`)
     .text('Игроки рядом', `bot:${bot.id}:nearby`)
-    .row()
-    .text('Настройки', `bot:${bot.id}:settings`)
+    .row();
+
+  if (status === 'online') {
+    const holding = manager.isHoldingRmb(bot.id);
+    kb.text(holding ? 'Отпустить ПКМ' : 'Зажать ПКМ', `bot:${bot.id}:rmb`)
+      .row();
+  }
+
+  kb.text('Настройки', `bot:${bot.id}:settings`)
     .row()
     .text('Обновить', `bot:${bot.id}:refresh`)
     .text('« К списку', 'bots:list');
@@ -241,6 +251,44 @@ export function registerPanel(bot: import('grammy').Bot<BotContext>, manager: Se
         .row()
         .text('« Назад', `bot:${id}`),
     );
+  });
+
+  bot.callbackQuery(/^bot:(\d+):rmb$/, async (ctx) => {
+    if (!ensureAdmin(ctx)) return ctx.answerCallbackQuery({ text: 'Нет доступа' });
+    const id = Number(ctx.match![1]);
+    if (manager.getStatus(id) !== 'online') {
+      await ctx.answerCallbackQuery({ text: 'Бот оффлайн' });
+      return;
+    }
+
+    const holding = manager.isHoldingRmb(id);
+    if (holding) {
+      const result = manager.releaseRmb(id);
+      const map = {
+        ok: 'ПКМ отпущен',
+        offline: 'Бот оффлайн',
+        not_holding: 'ПКМ уже не зажат',
+        fail: 'Не удалось отпустить',
+      } as const;
+      await ctx.answerCallbackQuery({ text: map[result] });
+    } else {
+      const result = manager.holdRmb(id);
+      const map = {
+        ok: 'ПКМ зажат',
+        offline: 'Бот оффлайн',
+        already: 'Уже зажат',
+        fail: 'Не удалось зажать',
+      } as const;
+      await ctx.answerCallbackQuery({ text: map[result] });
+      if (result === 'ok') {
+        void ctx.reply(`🖱 [#${id}] ПКМ зажат (предмет в основной руке)`);
+      }
+    }
+
+    const record = db.getBot(id);
+    if (record) {
+      await editOrReply(ctx, botCardText(record, manager), botActionsKeyboard(record, manager));
+    }
   });
 
   bot.callbackQuery(/^bot:(\d+):settings$/, async (ctx) => {

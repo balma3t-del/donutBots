@@ -75,6 +75,7 @@ export class BotSession extends EventEmitter {
   isSpawned = false;
   isProxyDown = false;
   isAuthFailed = false;
+  isHoldingRmb = false;
   stopped = false;
 
   bot: Bot | null = null;
@@ -87,6 +88,8 @@ export class BotSession extends EventEmitter {
 
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private nearbyScanTimer: ReturnType<typeof setInterval> | null = null;
+  /** Периодически обновляем use_item, чтобы сервер не «отпускал» ПКМ. */
+  private rmbHoldTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(opts: BotSessionOptions) {
     super();
@@ -121,6 +124,8 @@ export class BotSession extends EventEmitter {
     this.isSpawned = false;
     this.isProxyDown = false;
     this.isAuthFailed = false;
+    this.isHoldingRmb = false;
+    this.stopRmbHoldTimer();
     this.inGameName = null;
     this.nearbyPlayers.clear();
 
@@ -167,6 +172,7 @@ export class BotSession extends EventEmitter {
   quit(disableReconnect = false) {
     if (disableReconnect) this.reconnect = false;
     this.stopped = true;
+    this.releaseRmb(false);
     this.stopNearbyScan();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -187,6 +193,65 @@ export class BotSession extends EventEmitter {
     } catch (error) {
       logger.error(`[bot #${this.id}] chat failed`, error);
       return false;
+    }
+  }
+
+  /** Зажать ПКМ (использовать предмет в руке). */
+  holdRmb(offHand = false): 'ok' | 'offline' | 'already' | 'fail' {
+    const bot = this.bot;
+    if (!bot || !this.isActive || !this.isSpawned) return 'offline';
+    if (this.isHoldingRmb) return 'already';
+
+    try {
+      bot.activateItem(offHand);
+      this.isHoldingRmb = true;
+      this.stopRmbHoldTimer();
+      // На части серверов use сбрасывается — периодически подтверждаем зажатие
+      this.rmbHoldTimer = setInterval(() => {
+        if (!this.bot || !this.isHoldingRmb || !this.isActive) {
+          this.stopRmbHoldTimer();
+          return;
+        }
+        try {
+          this.bot.activateItem(offHand);
+        } catch (error) {
+          logger.warn(`[bot #${this.id}] rmb re-activate failed`, error);
+        }
+      }, 250);
+      logger.info(`[bot #${this.id}] RMB hold on (offHand=${offHand})`);
+      return 'ok';
+    } catch (error) {
+      logger.error(`[bot #${this.id}] holdRmb failed`, error);
+      this.isHoldingRmb = false;
+      this.stopRmbHoldTimer();
+      return 'fail';
+    }
+  }
+
+  /** Отпустить ПКМ. */
+  releaseRmb(notify = true): 'ok' | 'offline' | 'not_holding' | 'fail' {
+    this.stopRmbHoldTimer();
+    if (!this.isHoldingRmb) return 'not_holding';
+
+    const bot = this.bot;
+    this.isHoldingRmb = false;
+    if (!bot || !this.isActive) return 'offline';
+
+    try {
+      bot.deactivateItem();
+      logger.info(`[bot #${this.id}] RMB hold off`);
+      if (notify) void this.notify(`🖐 [#${this.id}] ПКМ отпущен`);
+      return 'ok';
+    } catch (error) {
+      logger.error(`[bot #${this.id}] releaseRmb failed`, error);
+      return 'fail';
+    }
+  }
+
+  private stopRmbHoldTimer() {
+    if (this.rmbHoldTimer) {
+      clearInterval(this.rmbHoldTimer);
+      this.rmbHoldTimer = null;
     }
   }
 
@@ -386,6 +451,7 @@ export class BotSession extends EventEmitter {
     });
 
     bot.once('end', (reason?: string) => {
+      this.releaseRmb(false);
       this.stopNearbyScan();
       this.isConnect = false;
       this.isActive = false;
@@ -462,6 +528,8 @@ export class BotSession extends EventEmitter {
   }
 
   clear() {
+    this.stopRmbHoldTimer();
+    this.isHoldingRmb = false;
     this.stopNearbyScan();
     this.isConnect = false;
     this.isActive = false;
