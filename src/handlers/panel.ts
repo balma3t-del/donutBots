@@ -53,7 +53,7 @@ function botCardText(bot: BotRecord, manager: SessionManager): string {
   ];
   if (session?.inGameName) lines.splice(3, 0, `Ник: <b>${session.inGameName}</b>`);
   if (status === 'online') {
-    lines.push(`ПКМ: ${session?.isHoldingRmb ? 'зажат' : 'не зажат'}`);
+    lines.push(`Кликер: ${session?.isClickerOn ? 'вкл' : 'выкл'}`);
   }
   return lines.join('\n');
 }
@@ -75,8 +75,8 @@ function botActionsKeyboard(bot: BotRecord, manager: SessionManager): InlineKeyb
     .row();
 
   if (status === 'online') {
-    const holding = manager.isHoldingRmb(bot.id);
-    kb.text(holding ? 'Отпустить ПКМ' : 'Зажать ПКМ', `bot:${bot.id}:rmb`)
+    const clickerOn = manager.isClickerOn(bot.id);
+    kb.text(clickerOn ? 'Выкл кликер' : 'Вкл кликер', `bot:${bot.id}:clicker`)
       .row();
   }
 
@@ -253,7 +253,7 @@ export function registerPanel(bot: import('grammy').Bot<BotContext>, manager: Se
     );
   });
 
-  bot.callbackQuery(/^bot:(\d+):rmb$/, async (ctx) => {
+  bot.callbackQuery(/^bot:(\d+):clicker$/, async (ctx) => {
     if (!ensureAdmin(ctx)) return ctx.answerCallbackQuery({ text: 'Нет доступа' });
     const id = Number(ctx.match![1]);
     if (manager.getStatus(id) !== 'online') {
@@ -261,27 +261,26 @@ export function registerPanel(bot: import('grammy').Bot<BotContext>, manager: Se
       return;
     }
 
-    const holding = manager.isHoldingRmb(id);
-    if (holding) {
-      const result = manager.releaseRmb(id);
+    if (manager.isClickerOn(id)) {
+      const result = manager.stopClicker(id);
       const map = {
-        ok: 'ПКМ отпущен',
+        ok: 'Кликер выкл',
         offline: 'Бот оффлайн',
-        not_holding: 'ПКМ уже не зажат',
-        fail: 'Не удалось отпустить',
+        not_running: 'Кликер уже выкл',
+        fail: 'Ошибка',
       } as const;
       await ctx.answerCallbackQuery({ text: map[result] });
     } else {
-      const result = manager.holdRmb(id);
+      const result = manager.startClicker(id);
       const map = {
-        ok: 'ПКМ зажат',
+        ok: 'Кликер вкл',
         offline: 'Бот оффлайн',
-        already: 'Уже зажат',
-        fail: 'Не удалось зажать',
+        already: 'Уже включён',
+        fail: 'Ошибка',
       } as const;
       await ctx.answerCallbackQuery({ text: map[result] });
       if (result === 'ok') {
-        void ctx.reply(`🖱 [#${id}] ПКМ зажат (предмет в основной руке)`);
+        void ctx.reply(`🖱 [#${id}] Кликер включён (ЛКМ)`);
       }
     }
 

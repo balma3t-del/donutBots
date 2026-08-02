@@ -92,20 +92,20 @@ export class SessionManager {
     return { offline: false, text: session.formatNearbyList(), count: list.length };
   }
 
-  isHoldingRmb(botId: number): boolean {
-    return Boolean(this.sessions.get(botId)?.isHoldingRmb);
+  isClickerOn(botId: number): boolean {
+    return Boolean(this.sessions.get(botId)?.isClickerOn);
   }
 
-  holdRmb(botId: number): 'ok' | 'offline' | 'already' | 'fail' {
+  startClicker(botId: number): 'ok' | 'offline' | 'already' | 'fail' {
     const session = this.sessions.get(botId);
     if (!session) return 'offline';
-    return session.holdRmb();
+    return session.startClicker();
   }
 
-  releaseRmb(botId: number): 'ok' | 'offline' | 'not_holding' | 'fail' {
+  stopClicker(botId: number): 'ok' | 'offline' | 'not_running' | 'fail' {
     const session = this.sessions.get(botId);
     if (!session) return 'offline';
-    return session.releaseRmb(true);
+    return session.stopClicker(true);
   }
 
   /** После обновления конфига — выключить, чтобы при следующем старте взялись новые данные. */

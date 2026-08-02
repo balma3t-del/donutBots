@@ -5,6 +5,7 @@ import mineflayer, { type Bot } from 'mineflayer';
 import { SocksClient } from 'socks';
 import type { Client } from 'minecraft-protocol';
 import {
+  CLICKER_CPS,
   MC_HOST,
   MC_PORT,
   MC_VERSION,
@@ -75,7 +76,7 @@ export class BotSession extends EventEmitter {
   isSpawned = false;
   isProxyDown = false;
   isAuthFailed = false;
-  isHoldingRmb = false;
+  isClickerOn = false;
   stopped = false;
 
   bot: Bot | null = null;
@@ -88,8 +89,7 @@ export class BotSession extends EventEmitter {
 
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private nearbyScanTimer: ReturnType<typeof setInterval> | null = null;
-  /** Периодически обновляем use_item, чтобы сервер не «отпускал» ПКМ. */
-  private rmbHoldTimer: ReturnType<typeof setInterval> | null = null;
+  private clickerTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(opts: BotSessionOptions) {
     super();
@@ -124,8 +124,8 @@ export class BotSession extends EventEmitter {
     this.isSpawned = false;
     this.isProxyDown = false;
     this.isAuthFailed = false;
-    this.isHoldingRmb = false;
-    this.stopRmbHoldTimer();
+    this.isClickerOn = false;
+    this.stopClickerTimer();
     this.inGameName = null;
     this.nearbyPlayers.clear();
 
@@ -172,7 +172,7 @@ export class BotSession extends EventEmitter {
   quit(disableReconnect = false) {
     if (disableReconnect) this.reconnect = false;
     this.stopped = true;
-    this.releaseRmb(false);
+    this.stopClicker(false);
     this.stopNearbyScan();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -196,62 +196,68 @@ export class BotSession extends EventEmitter {
     }
   }
 
-  /** Зажать ПКМ (использовать предмет в руке). */
-  holdRmb(offHand = false): 'ok' | 'offline' | 'already' | 'fail' {
+  /** Включить автокликер (ЛКМ): swing + удар по ближайшей цели в досягаемости. */
+  startClicker(): 'ok' | 'offline' | 'already' | 'fail' {
     const bot = this.bot;
     if (!bot || !this.isActive || !this.isSpawned) return 'offline';
-    if (this.isHoldingRmb) return 'already';
+    if (this.isClickerOn) return 'already';
 
     try {
-      bot.activateItem(offHand);
-      this.isHoldingRmb = true;
-      this.stopRmbHoldTimer();
-      // На части серверов use сбрасывается — периодически подтверждаем зажатие
-      this.rmbHoldTimer = setInterval(() => {
-        if (!this.bot || !this.isHoldingRmb || !this.isActive) {
-          this.stopRmbHoldTimer();
-          return;
-        }
-        try {
-          this.bot.activateItem(offHand);
-        } catch (error) {
-          logger.warn(`[bot #${this.id}] rmb re-activate failed`, error);
-        }
-      }, 250);
-      logger.info(`[bot #${this.id}] RMB hold on (offHand=${offHand})`);
+      this.isClickerOn = true;
+      this.stopClickerTimer();
+      const intervalMs = Math.round(1000 / CLICKER_CPS);
+      this.clickerTimer = setInterval(() => this.clickOnce(), intervalMs);
+      logger.info(`[bot #${this.id}] clicker on (${CLICKER_CPS} CPS)`);
       return 'ok';
     } catch (error) {
-      logger.error(`[bot #${this.id}] holdRmb failed`, error);
-      this.isHoldingRmb = false;
-      this.stopRmbHoldTimer();
+      logger.error(`[bot #${this.id}] startClicker failed`, error);
+      this.isClickerOn = false;
+      this.stopClickerTimer();
       return 'fail';
     }
   }
 
-  /** Отпустить ПКМ. */
-  releaseRmb(notify = true): 'ok' | 'offline' | 'not_holding' | 'fail' {
-    this.stopRmbHoldTimer();
-    if (!this.isHoldingRmb) return 'not_holding';
+  /** Выключить автокликер. */
+  stopClicker(notify = true): 'ok' | 'offline' | 'not_running' | 'fail' {
+    this.stopClickerTimer();
+    if (!this.isClickerOn) return 'not_running';
+    this.isClickerOn = false;
+    logger.info(`[bot #${this.id}] clicker off`);
+    if (notify) void this.notify(`🖐 [#${this.id}] Кликер выключен`);
+    return this.bot && this.isActive ? 'ok' : 'offline';
+  }
 
+  private stopClickerTimer() {
+    if (this.clickerTimer) {
+      clearInterval(this.clickerTimer);
+      this.clickerTimer = null;
+    }
+  }
+
+  private clickOnce() {
     const bot = this.bot;
-    this.isHoldingRmb = false;
-    if (!bot || !this.isActive) return 'offline';
+    if (!bot || !this.isClickerOn || !this.isActive || !this.isSpawned) {
+      this.stopClickerTimer();
+      return;
+    }
 
     try {
-      bot.deactivateItem();
-      logger.info(`[bot #${this.id}] RMB hold off`);
-      if (notify) void this.notify(`🖐 [#${this.id}] ПКМ отпущен`);
-      return 'ok';
-    } catch (error) {
-      logger.error(`[bot #${this.id}] releaseRmb failed`, error);
-      return 'fail';
-    }
-  }
+      const target = bot.nearestEntity((entity) => {
+        if (!entity?.position || !bot.entity?.position) return false;
+        if (entity === bot.entity) return false;
+        const dist = bot.entity.position.distanceTo(entity.position);
+        if (dist > 4.5) return false;
+        // Игроки и мобы
+        return entity.type === 'player' || entity.type === 'mob';
+      });
 
-  private stopRmbHoldTimer() {
-    if (this.rmbHoldTimer) {
-      clearInterval(this.rmbHoldTimer);
-      this.rmbHoldTimer = null;
+      if (target) {
+        bot.attack(target, true);
+      } else {
+        bot.swingArm('right');
+      }
+    } catch (error) {
+      logger.warn(`[bot #${this.id}] click failed`, error);
     }
   }
 
@@ -451,7 +457,7 @@ export class BotSession extends EventEmitter {
     });
 
     bot.once('end', (reason?: string) => {
-      this.releaseRmb(false);
+      this.stopClicker(false);
       this.stopNearbyScan();
       this.isConnect = false;
       this.isActive = false;
@@ -528,8 +534,8 @@ export class BotSession extends EventEmitter {
   }
 
   clear() {
-    this.stopRmbHoldTimer();
-    this.isHoldingRmb = false;
+    this.stopClickerTimer();
+    this.isClickerOn = false;
     this.stopNearbyScan();
     this.isConnect = false;
     this.isActive = false;
