@@ -252,7 +252,7 @@ export class BotSession extends EventEmitter {
       });
 
       if (target) {
-        bot.attack(target, true);
+        bot.attack(target);
       } else {
         bot.swingArm('right');
       }
