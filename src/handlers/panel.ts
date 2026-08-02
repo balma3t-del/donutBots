@@ -62,10 +62,11 @@ function botActionsKeyboard(bot: BotRecord, manager: SessionManager): InlineKeyb
     status === 'online' ? 'Выключить' : status === 'connecting' ? 'Подключается...' : 'Включить';
 
   const kb = new InlineKeyboard();
-  if (status !== 'connecting') {
-    kb.text(powerText, status === 'online' ? `bot:${bot.id}:off` : `bot:${bot.id}:on`);
+  if (status === 'connecting') {
+    kb.text('Отменить подключение', `bot:${bot.id}:off`)
+      .text('Обновить', `bot:${bot.id}:refresh`);
   } else {
-    kb.text(powerText, `bot:${bot.id}:refresh`);
+    kb.text(powerText, status === 'online' ? `bot:${bot.id}:off` : `bot:${bot.id}:on`);
   }
   kb.row()
     .text('Отправить в чат', `bot:${bot.id}:chat`)

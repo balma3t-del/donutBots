@@ -5,6 +5,7 @@ import mineflayer, { type Bot } from 'mineflayer';
 import { SocksClient } from 'socks';
 import type { Client } from 'minecraft-protocol';
 import {
+  AUTH_TIMEOUT_MS,
   DEFAULT_CLICKER_CPS,
   MC_HOST,
   MC_PORT,
@@ -127,9 +128,11 @@ export class BotSession extends EventEmitter {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private nearbyScanTimer: ReturnType<typeof setInterval> | null = null;
   private clickerTimer: ReturnType<typeof setInterval> | null = null;
+  private authTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
   /** Последняя причина кика/дисконнекта для сообщения в TG. */
   private lastDisconnectReason: string | null = null;
   private disconnectNotified = false;
+  private msaCodeSent = false;
 
   constructor(opts: BotSessionOptions) {
     super();
@@ -169,6 +172,7 @@ export class BotSession extends EventEmitter {
     this.stopClickerTimer();
     this.lastDisconnectReason = null;
     this.disconnectNotified = false;
+    this.msaCodeSent = false;
     this.inGameName = null;
     this.nearbyPlayers.clear();
 
@@ -176,9 +180,14 @@ export class BotSession extends EventEmitter {
 
     // Парольный Microsoft-логин часто ломается (MFA / «try removing the password field»).
     // Всегда device-code + кэш токенов в profilesFolder.
+    const timeoutMin = Math.round(AUTH_TIMEOUT_MS / 60_000);
     void this.notify(
-      `🔄 [#${this.id}] Подключаюсь (${this.email})...\nОжидай код Microsoft в этом чате (если токен ещё не сохранён).`,
+      `🔄 [#${this.id}] Подключаюсь (${this.email})...\n`
+      + `Ожидай код Microsoft в этом чате (если токен ещё не сохранён).\n`
+      + `⏱ Таймаут: ${timeoutMin} мин. На сервере должен быть доступ к login.live.com / xboxlive.com.`,
     );
+
+    this.armAuthTimeout();
 
     const botOptions: Record<string, unknown> = {
       username: this.email,
@@ -193,12 +202,18 @@ export class BotSession extends EventEmitter {
       viewDistance: 10,
       hideErrors: true,
       onMsaCode: (data: { user_code?: string; verification_uri?: string; message?: string }) => {
+        this.msaCodeSent = true;
         const code = data.user_code ?? '?';
         const uri = data.verification_uri ?? 'https://www.microsoft.com/link';
         const hint = data.message || `Открой ${uri} и введи код ${code}`;
         logger.info(`[bot #${this.id}] MSA code: ${code}`);
         void this.notify(
-          `🔐 [#${this.id}] Microsoft auth\n<code>${escapeHtml(hint)}</code>\nКод: <code>${escapeHtml(code)}</code>\nСсылка: ${uri}`,
+          `🔐 [#${this.id}] Microsoft auth\n`
+          + `<code>${escapeHtml(hint)}</code>\n`
+          + `Код: <code>${escapeHtml(code)}</code>\n`
+          + `Ссылка: ${uri}\n\n`
+          + `После ввода кода бот ждёт ответ Microsoft — это может занять до пары минут.\n`
+          + `Если зависло: на сервере проверь исходящий HTTPS к Microsoft, или нажми «Отменить».`,
         );
       },
     };
@@ -207,14 +222,24 @@ export class BotSession extends EventEmitter {
       botOptions.connect = (client: Client) => this.createProxyConnection(client);
     }
 
-    this.bot = mineflayer.createBot(botOptions as any);
-    this.bindClientGuards();
-    this.bindEvents();
+    try {
+      this.bot = mineflayer.createBot(botOptions as any);
+      this.bindClientGuards();
+      this.bindEvents();
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      logger.error(`[bot #${this.id}] createBot failed`, error);
+      this.clearAuthTimeout();
+      this.isConnect = false;
+      this.isAuthFailed = true;
+      void this.notify(`❌ [#${this.id}] Не удалось создать сессию: <code>${escapeHtml(msg)}</code>`);
+    }
   }
 
   quit(disableReconnect = false) {
     if (disableReconnect) this.reconnect = false;
     this.stopped = true;
+    this.clearAuthTimeout();
     this.stopClicker(false);
     this.stopNearbyScan();
     if (this.reconnectTimer) {
@@ -225,6 +250,31 @@ export class BotSession extends EventEmitter {
       this.bot?.quit();
     } catch {
       // ignore
+    }
+  }
+
+  private armAuthTimeout() {
+    this.clearAuthTimeout();
+    this.authTimeoutTimer = setTimeout(() => {
+      if (this.isSpawned || this.stopped) return;
+      const hint = this.msaCodeSent
+        ? 'код был выдан, но вход не завершился (истёк / сеть сервера не достучалась до Microsoft)'
+        : 'код Microsoft так и не пришёл (сеть сервера / firewall / блокировка login.live.com)';
+      logger.warn(`[bot #${this.id}] auth timeout | ${hint}`);
+      this.isAuthFailed = true;
+      this.reconnect = false;
+      void this.notify(
+        `⏰ [#${this.id}] Таймаут авторизации\n${hint}\n`
+        + `На VPS нужен исходящий HTTPS к Microsoft. Затем снова «Включить».`,
+      );
+      this.quit(true);
+    }, AUTH_TIMEOUT_MS);
+  }
+
+  private clearAuthTimeout() {
+    if (this.authTimeoutTimer) {
+      clearTimeout(this.authTimeoutTimer);
+      this.authTimeoutTimer = null;
     }
   }
 
@@ -458,6 +508,7 @@ export class BotSession extends EventEmitter {
     });
 
     bot.once('login', () => {
+      this.clearAuthTimeout();
       this.isConnect = false;
       this.isActive = true;
       this.inGameName = bot.username;
@@ -466,6 +517,7 @@ export class BotSession extends EventEmitter {
     });
 
     bot.once('spawn', () => {
+      this.clearAuthTimeout();
       this.isSpawned = true;
       this.inGameName = bot.username;
       logger.info(`[bot #${this.id}] spawn @ ${bot.username}`);
@@ -523,6 +575,7 @@ export class BotSession extends EventEmitter {
     });
 
     bot.once('end', (reason?: string) => {
+      this.clearAuthTimeout();
       this.stopClicker(false);
       this.stopNearbyScan();
       this.isConnect = false;
@@ -618,6 +671,7 @@ export class BotSession extends EventEmitter {
   }
 
   clear() {
+    this.clearAuthTimeout();
     this.stopClickerTimer();
     this.isClickerOn = false;
     this.stopNearbyScan();
@@ -626,6 +680,7 @@ export class BotSession extends EventEmitter {
     this.isSpawned = false;
     this.lastDisconnectReason = null;
     this.disconnectNotified = false;
+    this.msaCodeSent = false;
     this.bot = null;
   }
 }
