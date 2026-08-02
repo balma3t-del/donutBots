@@ -50,11 +50,9 @@ function botCardText(bot: BotRecord, manager: SessionManager): string {
       pass: bot.proxyPass,
     })}</code>`,
     `Автореконнект: ${bot.reconnect ? 'вкл' : 'выкл'}`,
+    `Кликер ПКМ: ${session?.isClickerOn ? 'вкл' : 'выкл'} · ${session?.clickerCps ?? bot.clickerCps} CPS`,
   ];
   if (session?.inGameName) lines.splice(3, 0, `Ник: <b>${session.inGameName}</b>`);
-  if (status === 'online') {
-    lines.push(`Кликер: ${session?.isClickerOn ? 'вкл' : 'выкл'}`);
-  }
   return lines.join('\n');
 }
 
@@ -76,7 +74,7 @@ function botActionsKeyboard(bot: BotRecord, manager: SessionManager): InlineKeyb
 
   if (status === 'online') {
     const clickerOn = manager.isClickerOn(bot.id);
-    kb.text(clickerOn ? 'Выкл кликер' : 'Вкл кликер', `bot:${bot.id}:clicker`)
+    kb.text(clickerOn ? 'Выкл кликер ПКМ' : 'Вкл кликер ПКМ', `bot:${bot.id}:clicker`)
       .row();
   }
 
@@ -95,9 +93,28 @@ function settingsKeyboard(bot: BotRecord): InlineKeyboard {
     .text(bot.proxyHost ? 'Прокси ✓' : 'Прокси ✗', `bot:${bot.id}:set:proxy`)
     .text(bot.reconnect ? 'Реконнект: вкл' : 'Реконнект: выкл', `bot:${bot.id}:toggle:reconnect`)
     .row()
+    .text(`Кликер CPS: ${bot.clickerCps}`, `bot:${bot.id}:clicker:cps`)
+    .row()
     .text('🗑 Удалить', `bot:${bot.id}:delete`)
     .row()
     .text('« Назад', `bot:${bot.id}`);
+}
+
+function clickerCpsKeyboard(botId: number): InlineKeyboard {
+  return new InlineKeyboard()
+    .text('1', `bot:${botId}:clicker:cps:1`)
+    .text('5', `bot:${botId}:clicker:cps:5`)
+    .text('8', `bot:${botId}:clicker:cps:8`)
+    .text('10', `bot:${botId}:clicker:cps:10`)
+    .row()
+    .text('12', `bot:${botId}:clicker:cps:12`)
+    .text('15', `bot:${botId}:clicker:cps:15`)
+    .text('18', `bot:${botId}:clicker:cps:18`)
+    .text('20', `bot:${botId}:clicker:cps:20`)
+    .row()
+    .text('Своё число', `bot:${botId}:clicker:cps:custom`)
+    .row()
+    .text('« Назад', `bot:${botId}:settings`);
 }
 
 async function editOrReply(ctx: BotContext, text: string, keyboard: InlineKeyboard) {
@@ -280,7 +297,8 @@ export function registerPanel(bot: import('grammy').Bot<BotContext>, manager: Se
       } as const;
       await ctx.answerCallbackQuery({ text: map[result] });
       if (result === 'ok') {
-        void ctx.reply(`🖱 [#${id}] Кликер включён (ЛКМ)`);
+        const record = db.getBot(id);
+        void ctx.reply(`🖱 [#${id}] Кликер ПКМ включён (${record?.clickerCps ?? '?'} CPS)`);
       }
     }
 
@@ -288,6 +306,51 @@ export function registerPanel(bot: import('grammy').Bot<BotContext>, manager: Se
     if (record) {
       await editOrReply(ctx, botCardText(record, manager), botActionsKeyboard(record, manager));
     }
+  });
+
+  bot.callbackQuery(/^bot:(\d+):clicker:cps$/, async (ctx) => {
+    if (!ensureAdmin(ctx)) return ctx.answerCallbackQuery({ text: 'Нет доступа' });
+    const id = Number(ctx.match![1]);
+    const record = db.getBot(id);
+    if (!record) return ctx.answerCallbackQuery({ text: 'Не найден' });
+    clearAwait(ctx);
+    await ctx.answerCallbackQuery();
+    await editOrReply(
+      ctx,
+      `Кликер ПКМ — CPS для #${id}\nСейчас: <b>${record.clickerCps}</b>\nВыбери пресет или своё число (1–20)`,
+      clickerCpsKeyboard(id),
+    );
+  });
+
+  bot.callbackQuery(/^bot:(\d+):clicker:cps:custom$/, async (ctx) => {
+    if (!ensureAdmin(ctx)) return ctx.answerCallbackQuery({ text: 'Нет доступа' });
+    const id = Number(ctx.match![1]);
+    clearAwait(ctx);
+    ctx.session.awaitBotId = id;
+    ctx.session.awaitKind = 'set_clicker_cps';
+    await ctx.answerCallbackQuery();
+    await editOrReply(
+      ctx,
+      'Введи CPS числом от 1 до 20\n/cancel — отмена',
+      new InlineKeyboard().text('« Назад', `bot:${id}:clicker:cps`),
+    );
+  });
+
+  bot.callbackQuery(/^bot:(\d+):clicker:cps:(\d+)$/, async (ctx) => {
+    if (!ensureAdmin(ctx)) return ctx.answerCallbackQuery({ text: 'Нет доступа' });
+    const id = Number(ctx.match![1]);
+    const cps = Number(ctx.match![2]);
+    if (!manager.setClickerCps(id, cps)) {
+      await ctx.answerCallbackQuery({ text: 'Ошибка' });
+      return;
+    }
+    await ctx.answerCallbackQuery({ text: `CPS = ${cps}` });
+    const updated = db.getBot(id)!;
+    await editOrReply(
+      ctx,
+      `Настройки #${id}\n${botCardText(updated, manager)}`,
+      settingsKeyboard(updated),
+    );
   });
 
   bot.callbackQuery(/^bot:(\d+):settings$/, async (ctx) => {
@@ -438,6 +501,21 @@ export function registerPanel(bot: import('grammy').Bot<BotContext>, manager: Se
     const botId = ctx.session.awaitBotId;
     if (!botId) {
       clearAwait(ctx);
+      return;
+    }
+
+    if (kind === 'set_clicker_cps') {
+      const cps = Number(text.replace(',', '.'));
+      if (!Number.isFinite(cps) || cps < 1 || cps > 20) {
+        await ctx.reply('Нужно число от 1 до 20');
+        return;
+      }
+      manager.setClickerCps(botId, cps);
+      clearAwait(ctx);
+      const record = db.getBot(botId)!;
+      await ctx.reply(`Кликер CPS = ${record.clickerCps}`, {
+        reply_markup: settingsKeyboard(record),
+      });
       return;
     }
 

@@ -61,6 +61,7 @@ export class SessionManager {
       password: record.password,
       proxy: toProxy(record),
       reconnect: record.reconnect,
+      clickerCps: record.clickerCps,
       notify: this.notify,
     });
 
@@ -106,6 +107,15 @@ export class SessionManager {
     const session = this.sessions.get(botId);
     if (!session) return 'offline';
     return session.stopClicker(true);
+  }
+
+  setClickerCps(botId: number, cps: number): boolean {
+    const ok = db.updateBot(botId, { clickerCps: cps });
+    if (!ok) return false;
+    const session = this.sessions.get(botId);
+    const updated = db.getBot(botId);
+    if (session && updated) session.setClickerCps(updated.clickerCps);
+    return true;
   }
 
   /** После обновления конфига — выключить, чтобы при следующем старте взялись новые данные. */

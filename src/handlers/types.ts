@@ -17,6 +17,8 @@ export type BotRecord = {
   proxyUser: string;
   proxyPass: string;
   reconnect: boolean;
+  /** Клики ПКМ в секунду (1–20) */
+  clickerCps: number;
   createdAt: string;
 };
 
@@ -29,6 +31,7 @@ export type AwaitKind =
   | 'set_email'
   | 'set_password'
   | 'set_proxy'
+  | 'set_clicker_cps'
   | 'send_chat'
   | null;
 

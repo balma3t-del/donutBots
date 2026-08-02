@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
+import { DEFAULT_CLICKER_CPS, clampCps } from '../config.js';
 import type { BotRecord, ProxyConfig } from '../handlers/types.js';
 
 const DATA_DIR = path.resolve('data');
@@ -28,9 +29,16 @@ export class BotDatabase {
         proxy_user TEXT NOT NULL DEFAULT '',
         proxy_pass TEXT NOT NULL DEFAULT '',
         reconnect INTEGER NOT NULL DEFAULT 1,
+        clicker_cps INTEGER NOT NULL DEFAULT 10,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
     `);
+
+    // Миграция для уже существующих БД
+    const cols = this.db.prepare(`PRAGMA table_info(bots)`).all() as { name: string }[];
+    if (!cols.some((c) => c.name === 'clicker_cps')) {
+      this.db.exec(`ALTER TABLE bots ADD COLUMN clicker_cps INTEGER NOT NULL DEFAULT 10`);
+    }
   }
 
   listBots(): BotRecord[] {
@@ -48,11 +56,12 @@ export class BotDatabase {
     email: string;
     password?: string;
     proxy?: ProxyConfig | null;
+    clickerCps?: number;
   }): BotRecord {
     const result = this.db
       .prepare(
-        `INSERT INTO bots (label, email, password, proxy_host, proxy_port, proxy_user, proxy_pass, reconnect)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 1)`,
+        `INSERT INTO bots (label, email, password, proxy_host, proxy_port, proxy_user, proxy_pass, reconnect, clicker_cps)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)`,
       )
       .run(
         input.label?.trim() || input.email.split('@')[0] || 'bot',
@@ -62,6 +71,7 @@ export class BotDatabase {
         input.proxy?.port ?? 0,
         input.proxy?.user ?? '',
         input.proxy?.pass ?? '',
+        clampCps(input.clickerCps ?? DEFAULT_CLICKER_CPS),
       );
 
     const bot = this.getBot(Number(result.lastInsertRowid));
@@ -76,6 +86,7 @@ export class BotDatabase {
       email: string;
       password: string;
       reconnect: boolean;
+      clickerCps: number;
       proxy: ProxyConfig | null;
     }>,
   ): boolean {
@@ -101,7 +112,8 @@ export class BotDatabase {
           proxy_port = ?,
           proxy_user = ?,
           proxy_pass = ?,
-          reconnect = ?
+          reconnect = ?,
+          clicker_cps = ?
          WHERE id = ?`,
       )
       .run(
@@ -113,6 +125,7 @@ export class BotDatabase {
         proxy.user,
         proxy.pass,
         (patch.reconnect ?? current.reconnect) ? 1 : 0,
+        clampCps(patch.clickerCps ?? current.clickerCps),
         id,
       );
 
@@ -136,6 +149,7 @@ function mapRow(row: any): BotRecord {
     proxyUser: row.proxy_user ?? '',
     proxyPass: row.proxy_pass ?? '',
     reconnect: Boolean(row.reconnect),
+    clickerCps: clampCps(Number(row.clicker_cps ?? DEFAULT_CLICKER_CPS)),
     createdAt: row.created_at,
   };
 }

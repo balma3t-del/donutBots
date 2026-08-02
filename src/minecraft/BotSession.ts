@@ -5,13 +5,14 @@ import mineflayer, { type Bot } from 'mineflayer';
 import { SocksClient } from 'socks';
 import type { Client } from 'minecraft-protocol';
 import {
-  CLICKER_CPS,
+  DEFAULT_CLICKER_CPS,
   MC_HOST,
   MC_PORT,
   MC_VERSION,
   PROFILES_FOLDER,
   PROXY_DOWN_RECONNECT_MS,
   RECONNECT_DELAY_MS,
+  clampCps,
 } from '../config.js';
 import type { ProxyConfig } from '../handlers/types.js';
 import { checkProxyWorking, hasProxy } from '../utils/proxy.js';
@@ -45,6 +46,7 @@ export type BotSessionOptions = {
   password?: string;
   proxy?: ProxyConfig | null;
   reconnect: boolean;
+  clickerCps?: number;
   notify: NotifyFn;
 };
 
@@ -103,6 +105,7 @@ export class BotSession extends EventEmitter {
   password: string;
   proxy: ProxyConfig | null;
   reconnect: boolean;
+  clickerCps: number;
   notify: NotifyFn;
 
   isConnect = false;
@@ -135,6 +138,7 @@ export class BotSession extends EventEmitter {
     this.password = opts.password?.trim() || '';
     this.proxy = opts.proxy ?? null;
     this.reconnect = opts.reconnect;
+    this.clickerCps = clampCps(opts.clickerCps ?? DEFAULT_CLICKER_CPS);
     this.notify = opts.notify;
   }
 
@@ -235,7 +239,7 @@ export class BotSession extends EventEmitter {
     }
   }
 
-  /** Включить автокликер (ЛКМ): swing + удар по ближайшей цели в досягаемости. */
+  /** Включить автокликер ПКМ (activate/deactivate предмета в руке). */
   startClicker(): 'ok' | 'offline' | 'already' | 'fail' {
     const bot = this.bot;
     if (!bot || !this.isActive || !this.isSpawned) return 'offline';
@@ -243,10 +247,8 @@ export class BotSession extends EventEmitter {
 
     try {
       this.isClickerOn = true;
-      this.stopClickerTimer();
-      const intervalMs = Math.round(1000 / CLICKER_CPS);
-      this.clickerTimer = setInterval(() => this.clickOnce(), intervalMs);
-      logger.info(`[bot #${this.id}] clicker on (${CLICKER_CPS} CPS)`);
+      this.armClickerTimer();
+      logger.info(`[bot #${this.id}] RMB clicker on (${this.clickerCps} CPS)`);
       return 'ok';
     } catch (error) {
       logger.error(`[bot #${this.id}] startClicker failed`, error);
@@ -261,9 +263,26 @@ export class BotSession extends EventEmitter {
     this.stopClickerTimer();
     if (!this.isClickerOn) return 'not_running';
     this.isClickerOn = false;
-    logger.info(`[bot #${this.id}] clicker off`);
-    if (notify) void this.notify(`🖐 [#${this.id}] Кликер выключен`);
+    try {
+      this.bot?.deactivateItem();
+    } catch {
+      // ignore
+    }
+    logger.info(`[bot #${this.id}] RMB clicker off`);
+    if (notify) void this.notify(`🖐 [#${this.id}] Кликер ПКМ выключен`);
     return this.bot && this.isActive ? 'ok' : 'offline';
+  }
+
+  /** Обновить CPS на лету (если кликер включён — перезапускает таймер). */
+  setClickerCps(cps: number) {
+    this.clickerCps = clampCps(cps);
+    if (this.isClickerOn) this.armClickerTimer();
+  }
+
+  private armClickerTimer() {
+    this.stopClickerTimer();
+    const intervalMs = Math.max(50, Math.round(1000 / this.clickerCps));
+    this.clickerTimer = setInterval(() => this.clickOnce(), intervalMs);
   }
 
   private stopClickerTimer() {
@@ -273,6 +292,7 @@ export class BotSession extends EventEmitter {
     }
   }
 
+  /** Один клик ПКМ: use item → release. */
   private clickOnce() {
     const bot = this.bot;
     if (!bot || !this.isClickerOn || !this.isActive || !this.isSpawned) {
@@ -281,22 +301,18 @@ export class BotSession extends EventEmitter {
     }
 
     try {
-      const target = bot.nearestEntity((entity) => {
-        if (!entity?.position || !bot.entity?.position) return false;
-        if (entity === bot.entity) return false;
-        const dist = bot.entity.position.distanceTo(entity.position);
-        if (dist > 4.5) return false;
-        // Игроки и мобы
-        return entity.type === 'player' || entity.type === 'mob';
-      });
-
-      if (target) {
-        bot.attack(target);
-      } else {
-        bot.swingArm('right');
-      }
+      bot.activateItem();
+      // Короткий импульс «клика», не удержание
+      setTimeout(() => {
+        if (!this.bot || !this.isClickerOn) return;
+        try {
+          this.bot.deactivateItem();
+        } catch {
+          // ignore
+        }
+      }, 30);
     } catch (error) {
-      logger.warn(`[bot #${this.id}] click failed`, error);
+      logger.warn(`[bot #${this.id}] RMB click failed`, error);
     }
   }
 
