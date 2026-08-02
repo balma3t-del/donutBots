@@ -52,11 +52,45 @@ function chatToText(value: unknown): string {
   if (typeof value === 'string') return value;
   if (value == null) return '';
   if (typeof value !== 'object') return String(value);
-  const obj = value as Record<string, unknown>;
-  let result = typeof obj.text === 'string' ? obj.text : '';
-  if (Array.isArray(obj.extra)) result += obj.extra.map(chatToText).join('');
-  if (typeof obj.translate === 'string') result += obj.translate;
-  return result || JSON.stringify(value);
+
+  const obj = value as Record<string, any>;
+
+  // raw NBT: { type, value }
+  if (obj.type === 'compound' && obj.value && typeof obj.value === 'object') {
+    return chatToText(obj.value);
+  }
+  if (obj.type === 'string' && 'value' in obj) {
+    return String(obj.value ?? '');
+  }
+  if (obj.type === 'list' && obj.value?.value) {
+    const items = obj.value.value;
+    if (Array.isArray(items)) return items.map(chatToText).join('');
+  }
+
+  if (typeof obj.text === 'string' && obj.text) {
+    let result = obj.text;
+    if (Array.isArray(obj.extra)) result += obj.extra.map(chatToText).join('');
+    return result;
+  }
+  if (obj.text && typeof obj.text === 'object') {
+    let result = chatToText(obj.text);
+    if (obj.extra) result += chatToText(obj.extra);
+    return result;
+  }
+  if (obj.extra) return chatToText(obj.extra);
+  if (obj.translate) {
+    const withArgs = Array.isArray(obj.with)
+      ? `${obj.translate}: ${obj.with.map(chatToText).join(' ')}`
+      : String(obj.translate);
+    return withArgs;
+  }
+  if (obj.value != null && typeof obj.value !== 'object') return String(obj.value);
+
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }
 
 /**
@@ -90,6 +124,9 @@ export class BotSession extends EventEmitter {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private nearbyScanTimer: ReturnType<typeof setInterval> | null = null;
   private clickerTimer: ReturnType<typeof setInterval> | null = null;
+  /** Последняя причина кика/дисконнекта для сообщения в TG. */
+  private lastDisconnectReason: string | null = null;
+  private disconnectNotified = false;
 
   constructor(opts: BotSessionOptions) {
     super();
@@ -126,6 +163,8 @@ export class BotSession extends EventEmitter {
     this.isAuthFailed = false;
     this.isClickerOn = false;
     this.stopClickerTimer();
+    this.lastDisconnectReason = null;
+    this.disconnectNotified = false;
     this.inGameName = null;
     this.nearbyPlayers.clear();
 
@@ -438,14 +477,25 @@ export class BotSession extends EventEmitter {
       }
     });
 
-    bot.once('kicked', (reason) => {
-      const text = chatToText(reason);
+    bot.on('kicked', (reason) => {
+      const text = chatToText(reason) || 'unknown kick';
+      this.lastDisconnectReason = `kick: ${text}`;
       logger.warn(`[bot #${this.id}] kicked: ${text}`);
-      void this.notify(`🚪 [#${this.id}] Кик: <code>${escapeHtml(text.slice(0, 400))}</code>`);
+      this.notifyDisconnect(`🚪 [#${this.id}] Кикнут с сервера\n<code>${escapeHtml(text.slice(0, 500))}</code>`);
+    });
+
+    // Сырой пакет disconnect (часто приходит вместо/раньше kicked)
+    bot._client.on('disconnect', (packet: { reason?: unknown }) => {
+      const text = chatToText(packet?.reason) || 'disconnect packet';
+      this.lastDisconnectReason = `disconnect: ${text}`;
+      logger.warn(`[bot #${this.id}] disconnect packet: ${text}`);
     });
 
     bot.on('error', (err) => {
       logger.error(`[bot #${this.id}] error: ${err.message}`);
+      if (!this.lastDisconnectReason) {
+        this.lastDisconnectReason = `error: ${err.message}`;
+      }
       const msg = err.message.toLowerCase();
       if (msg.includes('authentication') || msg.includes('sign in failed')) {
         this.isAuthFailed = true;
@@ -461,11 +511,29 @@ export class BotSession extends EventEmitter {
       this.stopNearbyScan();
       this.isConnect = false;
       this.isActive = false;
-      logger.warn(`[bot #${this.id}] end: ${reason ?? 'no reason'}`);
-      void this.notify(`❗ [#${this.id}] Отключён`);
-      this.emit('end', reason);
+
+      const endReason = reason?.trim() || 'no reason';
+      const detail = this.lastDisconnectReason
+        ? `${this.lastDisconnectReason}\nend: ${endReason}`
+        : `end: ${endReason}`;
+      logger.warn(`[bot #${this.id}] end | ${detail}`);
+
+      // Если kicked уже уведомил — не дублируем, иначе шлём полный end
+      if (!this.disconnectNotified) {
+        this.notifyDisconnect(
+          `❗ [#${this.id}] Отключён\n<code>${escapeHtml(detail.slice(0, 500))}</code>`,
+        );
+      }
+
+      this.emit('end', detail);
       this.scheduleReconnect();
     });
+  }
+
+  private notifyDisconnect(text: string) {
+    if (this.disconnectNotified) return;
+    this.disconnectNotified = true;
+    void this.notify(text);
   }
 
   private startNearbyScan() {
@@ -540,6 +608,8 @@ export class BotSession extends EventEmitter {
     this.isConnect = false;
     this.isActive = false;
     this.isSpawned = false;
+    this.lastDisconnectReason = null;
+    this.disconnectNotified = false;
     this.bot = null;
   }
 }
