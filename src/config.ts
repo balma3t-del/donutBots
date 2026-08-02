@@ -29,6 +29,9 @@ export const AUTH_TIMEOUT_MS = Number(process.env.AUTH_TIMEOUT_MS ?? 12 * 60_000
 /** CPS кликера ПКМ по умолчанию (1–20). */
 export const DEFAULT_CLICKER_CPS = clampCps(Number(process.env.CLICKER_CPS ?? 10));
 
+/** Длительность плавного поворота на 360° после входа (мс). */
+export const JOIN_SPIN_MS = Math.max(2000, Number(process.env.JOIN_SPIN_MS ?? 6000));
+
 export function clampCps(value: number): number {
   if (!Number.isFinite(value)) return 10;
   return Math.min(20, Math.max(1, Math.round(value)));

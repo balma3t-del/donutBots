@@ -7,6 +7,7 @@ import type { Client } from 'minecraft-protocol';
 import {
   AUTH_TIMEOUT_MS,
   DEFAULT_CLICKER_CPS,
+  JOIN_SPIN_MS,
   MC_HOST,
   MC_PORT,
   MC_VERSION,
@@ -129,6 +130,7 @@ export class BotSession extends EventEmitter {
   private nearbyScanTimer: ReturnType<typeof setInterval> | null = null;
   private clickerTimer: ReturnType<typeof setInterval> | null = null;
   private authTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+  private joinSpinToken = 0;
   /** Последняя причина кика/дисконнекта для сообщения в TG. */
   private lastDisconnectReason: string | null = null;
   private disconnectNotified = false;
@@ -239,6 +241,7 @@ export class BotSession extends EventEmitter {
   quit(disableReconnect = false) {
     if (disableReconnect) this.reconnect = false;
     this.stopped = true;
+    this.joinSpinToken += 1; // прервать плавный поворот
     this.clearAuthTimeout();
     this.stopClicker(false);
     this.stopNearbyScan();
@@ -251,6 +254,61 @@ export class BotSession extends EventEmitter {
     } catch {
       // ignore
     }
+  }
+
+  /**
+   * Медленный поворот на 360° look-пакетами с человеческим темпом
+   * (не мгновенный snap yaw).
+   */
+  private async smoothSpin360() {
+    const bot = this.bot;
+    if (!bot?.entity || !this.isSpawned || this.stopped) return;
+
+    const token = ++this.joinSpinToken;
+    const startYaw = bot.entity.yaw;
+    const basePitch = bot.entity.pitch;
+    const duration = JOIN_SPIN_MS;
+    // ~человеческий look rate: ~15–20 обновлений/сек, не каждый тик сервера пачкой
+    const stepMs = 55 + Math.floor(Math.random() * 25); // 55–80ms
+    const steps = Math.max(24, Math.round(duration / stepMs));
+    // Случайное направление (по/против часовой)
+    const dir = Math.random() < 0.5 ? 1 : -1;
+
+    logger.info(`[bot #${this.id}] join spin start (${duration}ms, steps=${steps})`);
+
+    for (let i = 1; i <= steps; i++) {
+      if (token !== this.joinSpinToken || !this.bot?.entity || this.stopped || !this.isSpawned) {
+        return;
+      }
+
+      const t = i / steps;
+      // ease-in-out: медленнее в начале/конце, как у игрока
+      const eased = t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2;
+      const yaw = startYaw + dir * Math.PI * 2 * eased;
+      // крошечный шум pitch — не «идеальная» ось бота
+      const pitch = basePitch + Math.sin(t * Math.PI * 2) * 0.02;
+
+      try {
+        // force=true: мы сами задаём темп задержками; physics у нас выключен
+        await this.bot.look(yaw, pitch, true);
+      } catch {
+        return;
+      }
+
+      const jitter = stepMs + Math.floor(Math.random() * 20) - 8;
+      await sleep(Math.max(40, jitter));
+    }
+
+    // Вернуть pitch ближе к исходному
+    if (token === this.joinSpinToken && this.bot?.entity && !this.stopped) {
+      try {
+        await this.bot.look(this.bot.entity.yaw, basePitch, true);
+      } catch {
+        // ignore
+      }
+    }
+
+    logger.info(`[bot #${this.id}] join spin done`);
   }
 
   private armAuthTimeout() {
@@ -523,6 +581,10 @@ export class BotSession extends EventEmitter {
       logger.info(`[bot #${this.id}] spawn @ ${bot.username}`);
       this.emit('spawn');
       this.startNearbyScan();
+      // Небольшая пауза после спавна — как игрок осматривается
+      setTimeout(() => {
+        void this.smoothSpin360();
+      }, 800 + Math.floor(Math.random() * 700));
     });
 
     // Мгновенная реакция на появление entity игрока
@@ -575,6 +637,7 @@ export class BotSession extends EventEmitter {
     });
 
     bot.once('end', (reason?: string) => {
+      this.joinSpinToken += 1;
       this.clearAuthTimeout();
       this.stopClicker(false);
       this.stopNearbyScan();
@@ -690,4 +753,8 @@ function escapeHtml(text: string): string {
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;');
+}
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
