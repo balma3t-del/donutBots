@@ -5,6 +5,8 @@ import mineflayer, { type Bot } from 'mineflayer';
 import { SocksClient } from 'socks';
 import type { Client } from 'minecraft-protocol';
 import {
+  ALREADY_ONLINE_MAX_STREAK,
+  ALREADY_ONLINE_RECONNECT_MS,
   AUTH_TIMEOUT_MS,
   DEFAULT_CLICKER_CPS,
   JOIN_SPIN_MS,
@@ -135,6 +137,8 @@ export class BotSession extends EventEmitter {
   private lastDisconnectReason: string | null = null;
   private disconnectNotified = false;
   private msaCodeSent = false;
+  /** Подряд кики «already online» — сессия на прокси не отвалилась. */
+  private alreadyOnlineStreak = 0;
 
   constructor(opts: BotSessionOptions) {
     super();
@@ -577,6 +581,7 @@ export class BotSession extends EventEmitter {
     bot.once('spawn', () => {
       this.clearAuthTimeout();
       this.isSpawned = true;
+      this.alreadyOnlineStreak = 0;
       this.inGameName = bot.username;
       logger.info(`[bot #${this.id}] spawn @ ${bot.username}`);
       this.emit('spawn');
@@ -725,9 +730,45 @@ export class BotSession extends EventEmitter {
       return;
     }
 
-    const delay = this.isProxyDown ? PROXY_DOWN_RECONNECT_MS : RECONNECT_DELAY_MS;
+    const reasonText = this.lastDisconnectReason ?? '';
+    const alreadyOnline = isAlreadyOnlineReason(reasonText);
+
+    if (alreadyOnline) {
+      this.alreadyOnlineStreak += 1;
+      if (this.alreadyOnlineStreak >= ALREADY_ONLINE_MAX_STREAK) {
+        this.reconnect = false;
+        this.clear();
+        void this.notify(
+          `⛔ [#${this.id}] Стоп реконнекта: ${this.alreadyOnlineStreak}× «already online».\n`
+          + `Прокси ещё держит сессию. Подожди 1–2 мин и нажми «Включить» вручную.\n`
+          + `Также проверь, что аккаунт не запущен в другом месте.`,
+        );
+        return;
+      }
+    } else if (this.isSpawned || this.isActive) {
+      // Успели поиграть — сбрасываем серию ghost-сессий
+      this.alreadyOnlineStreak = 0;
+    }
+
+    let delay = RECONNECT_DELAY_MS;
+    let delayNote = '';
+    if (this.isProxyDown) {
+      delay = PROXY_DOWN_RECONNECT_MS;
+      delayNote = ' (прокси)';
+    } else if (alreadyOnline) {
+      // Прокси не сразу отпускает слот — 5с только усугубляет цикл
+      delay = ALREADY_ONLINE_RECONNECT_MS * this.alreadyOnlineStreak;
+      delayNote = ` (already online ×${this.alreadyOnlineStreak})`;
+    } else if (/kick:|disconnect:/i.test(reasonText)) {
+      // После любого кика даём прокси чуть отпустить сессию
+      delay = Math.max(RECONNECT_DELAY_MS, 15_000);
+      delayNote = ' (после кика)';
+    }
+
     this.clear();
-    void this.notify(`♻ [#${this.id}] Реконнект через ${Math.round(delay / 1000)}с...`);
+    void this.notify(
+      `♻ [#${this.id}] Реконнект через ${Math.round(delay / 1000)}с${delayNote}...`,
+    );
     this.reconnectTimer = setTimeout(() => {
       if (!this.stopped && this.reconnect) this.create();
     }, delay);
@@ -745,7 +786,18 @@ export class BotSession extends EventEmitter {
     this.disconnectNotified = false;
     this.msaCodeSent = false;
     this.bot = null;
+    // alreadyOnlineStreak специально НЕ сбрасываем здесь
   }
+}
+
+function isAlreadyOnlineReason(text: string): boolean {
+  const t = text.toLowerCase();
+  return (
+    t.includes('already online')
+    || t.includes('уже онлайн')
+    || t.includes('already connected')
+    || t.includes('already logged')
+  );
 }
 
 function escapeHtml(text: string): string {

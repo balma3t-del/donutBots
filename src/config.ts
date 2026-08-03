@@ -23,6 +23,10 @@ export const PROFILES_FOLDER = process.env.PROFILES_FOLDER?.trim() || './data/pr
 
 export const RECONNECT_DELAY_MS = Number(process.env.RECONNECT_DELAY_MS ?? 5000);
 export const PROXY_DOWN_RECONNECT_MS = Number(process.env.PROXY_DOWN_RECONNECT_MS ?? 60_000);
+/** Пауза после кика «already online» — прокси ещё держит сессию. */
+export const ALREADY_ONLINE_RECONNECT_MS = Number(process.env.ALREADY_ONLINE_RECONNECT_MS ?? 60_000);
+/** Сколько раз подряд «already online» — после этого стоп (ручной перезапуск). */
+export const ALREADY_ONLINE_MAX_STREAK = Number(process.env.ALREADY_ONLINE_MAX_STREAK ?? 3);
 /** Таймаут Microsoft auth / коннекта до spawn (мс). Device-code обычно ~15 мин. */
 export const AUTH_TIMEOUT_MS = Number(process.env.AUTH_TIMEOUT_MS ?? 12 * 60_000);
 
