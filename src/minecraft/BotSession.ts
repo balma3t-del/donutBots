@@ -733,17 +733,13 @@ export class BotSession extends EventEmitter {
     const reasonText = this.lastDisconnectReason ?? '';
 
     // Кики DonutSMP, где реконнект только ломает proxy join-cache
-    const proxyTicket = extractProxyTicket(reasonText);
     if (isDonutProxyHardFail(reasonText)) {
       this.reconnect = false;
       this.clear();
-      const ticketLine = proxyTicket
-        ? `\nTicket/proxy id: <code>${escapeHtml(proxyTicket)}</code> — кинь в Discord-тикет DonutSMP.`
-        : '';
       void this.notify(
-        `⛔ [#${this.id}] Реконнект остановлен: ошибка прокси DonutSMP / security kick.${ticketLine}\n`
+        `⛔ [#${this.id}] Реконнект остановлен: security/proxy kick.\n`
         + `Авто-реконнект тут вреден (получается «already online»).\n`
-        + `Подожди 2–5 мин и включи вручную. Если снова ticket — это баг их прокси на аккаунте.`,
+        + `Подожди 2–5 мин и нажми «Включить» вручную.`,
       );
       return;
     }
@@ -757,8 +753,7 @@ export class BotSession extends EventEmitter {
         this.clear();
         void this.notify(
           `⛔ [#${this.id}] Стоп реконнекта: ${this.alreadyOnlineStreak}× «already online».\n`
-          + `Прокси ещё держит сессию (часто после их «make a ticket»).\n`
-          + `Подожди 2–5 мин, потом «Включить» вручную.`,
+          + `Прокси ещё держит сессию. Подожди 2–5 мин, потом «Включить» вручную.`,
         );
         return;
       }
@@ -825,11 +820,6 @@ function isDonutProxyHardFail(text: string): boolean {
     || t.includes('make a ticket')
     || t.includes('you should make a ticket')
   );
-}
-
-function extractProxyTicket(text: string): string | null {
-  const m = text.match(/\b(?:ticket\s+)?([a-f0-9]{10,})\b/i);
-  return m?.[1] ?? null;
 }
 
 function escapeHtml(text: string): string {
