@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { bot } from './bot.js';
 import { ADMIN_IDS, MC_HOST, MC_PORT, MC_VERSION } from './config.js';
+import { db } from './database/db.js';
 import { registerPanel } from './handlers/panel.js';
 import { SessionManager } from './minecraft/SessionManager.js';
 import { logger } from './utils/logger.js';
@@ -37,14 +38,17 @@ async function main() {
   logger.info(`MC target ${MC_HOST}:${MC_PORT} (${MC_VERSION})`);
   logger.info(`Admins: ${ADMIN_IDS.join(', ') || 'none'}`);
 
-  process.on('SIGINT', () => {
+  const gracefulExit = () => {
     manager.shutdownAll();
+    try {
+      db.close();
+    } catch {
+      // already closed
+    }
     process.exit(0);
-  });
-  process.on('SIGTERM', () => {
-    manager.shutdownAll();
-    process.exit(0);
-  });
+  };
+  process.on('SIGINT', gracefulExit);
+  process.on('SIGTERM', gracefulExit);
 
   // drop pending updates — меньше гонок при рестарте
   await bot.api.deleteWebhook({ drop_pending_updates: true }).catch(() => {});

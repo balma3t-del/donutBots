@@ -13,8 +13,20 @@ export class BotDatabase {
   constructor(dbPath = DB_PATH) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     this.db = new Database(dbPath);
-    this.db.pragma('journal_mode = WAL');
+    // DELETE: все данные в bots.db (без -wal/-shm). GUI/SFTP не «пустые», пока процесс жив.
+    // При апгрейде со старого WAL SQLite сам сделает checkpoint при смене режима.
+    this.db.pragma('journal_mode = DELETE');
     this.init();
+  }
+
+  /** Checkpoint (если был WAL) и закрытие — вызывать на SIGTERM/SIGINT. */
+  close() {
+    try {
+      this.db.pragma('wal_checkpoint(TRUNCATE)');
+    } catch {
+      // не WAL или уже закрыто — ок
+    }
+    this.db.close();
   }
 
   private init() {
