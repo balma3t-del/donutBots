@@ -731,6 +731,23 @@ export class BotSession extends EventEmitter {
     }
 
     const reasonText = this.lastDisconnectReason ?? '';
+
+    // Кики DonutSMP, где реконнект только ломает proxy join-cache
+    const proxyTicket = extractProxyTicket(reasonText);
+    if (isDonutProxyHardFail(reasonText)) {
+      this.reconnect = false;
+      this.clear();
+      const ticketLine = proxyTicket
+        ? `\nTicket/proxy id: <code>${escapeHtml(proxyTicket)}</code> — кинь в Discord-тикет DonutSMP.`
+        : '';
+      void this.notify(
+        `⛔ [#${this.id}] Реконнект остановлен: ошибка прокси DonutSMP / security kick.${ticketLine}\n`
+        + `Авто-реконнект тут вреден (получается «already online»).\n`
+        + `Подожди 2–5 мин и включи вручную. Если снова ticket — это баг их прокси на аккаунте.`,
+      );
+      return;
+    }
+
     const alreadyOnline = isAlreadyOnlineReason(reasonText);
 
     if (alreadyOnline) {
@@ -740,13 +757,12 @@ export class BotSession extends EventEmitter {
         this.clear();
         void this.notify(
           `⛔ [#${this.id}] Стоп реконнекта: ${this.alreadyOnlineStreak}× «already online».\n`
-          + `Прокси ещё держит сессию. Подожди 1–2 мин и нажми «Включить» вручную.\n`
-          + `Также проверь, что аккаунт не запущен в другом месте.`,
+          + `Прокси ещё держит сессию (часто после их «make a ticket»).\n`
+          + `Подожди 2–5 мин, потом «Включить» вручную.`,
         );
         return;
       }
     } else if (this.isSpawned || this.isActive) {
-      // Успели поиграть — сбрасываем серию ghost-сессий
       this.alreadyOnlineStreak = 0;
     }
 
@@ -756,11 +772,9 @@ export class BotSession extends EventEmitter {
       delay = PROXY_DOWN_RECONNECT_MS;
       delayNote = ' (прокси)';
     } else if (alreadyOnline) {
-      // Прокси не сразу отпускает слот — 5с только усугубляет цикл
       delay = ALREADY_ONLINE_RECONNECT_MS * this.alreadyOnlineStreak;
       delayNote = ` (already online ×${this.alreadyOnlineStreak})`;
     } else if (/kick:|disconnect:/i.test(reasonText)) {
-      // После любого кика даём прокси чуть отпустить сессию
       delay = Math.max(RECONNECT_DELAY_MS, 15_000);
       delayNote = ' (после кика)';
     }
@@ -798,6 +812,24 @@ function isAlreadyOnlineReason(text: string): boolean {
     || t.includes('already connected')
     || t.includes('already logged')
   );
+}
+
+/** Security / внутренний краш proxy DonutSMP — реконнект усугубляет ghost-session. */
+function isDonutProxyHardFail(text: string): boolean {
+  const t = text.toLowerCase();
+  return (
+    t.includes('unauthorized login')
+    || t.includes('confirm the login')
+    || t.includes("don't know what happened")
+    || t.includes('do not know what happened')
+    || t.includes('make a ticket')
+    || t.includes('you should make a ticket')
+  );
+}
+
+function extractProxyTicket(text: string): string | null {
+  const m = text.match(/\b(?:ticket\s+)?([a-f0-9]{10,})\b/i);
+  return m?.[1] ?? null;
 }
 
 function escapeHtml(text: string): string {
