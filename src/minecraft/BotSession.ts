@@ -1,6 +1,5 @@
 import { EventEmitter } from 'node:events';
-import fs from 'node:fs';
-import path from 'node:path';
+import { createRequire } from 'node:module';
 import mineflayer, { type Bot } from 'mineflayer';
 import { SocksClient } from 'socks';
 import type { Client } from 'minecraft-protocol';
@@ -13,14 +12,32 @@ import {
   MC_HOST,
   MC_PORT,
   MC_VERSION,
-  PROFILES_FOLDER,
   PROXY_DOWN_RECONNECT_MS,
   RECONNECT_DELAY_MS,
   clampCps,
 } from '../config.js';
 import type { ProxyConfig } from '../handlers/types.js';
+import { captchaEnabled, solveFuntimeCaptcha } from '../utils/captchaSolver.js';
 import { checkProxyWorking, hasProxy } from '../utils/proxy.js';
 import { logger } from '../utils/logger.js';
+import { findDmRefreshSlot, findGoldIngotSlot, formatWindowDumpChunks, listWindowItemNames, stripMinecraftText } from './formatWindow.js';
+import { attachFuntimeAuth } from './funtimeAuth.js';
+
+const require = createRequire(import.meta.url);
+// CJS package
+const FlayerCaptcha = require('flayercaptcha') as new (
+  bot: Bot,
+  config?: { delay?: number; isStopped?: boolean },
+) => {
+  on(
+    event: 'imageReady',
+    cb: (payload: {
+      data: { facing?: string; minDistance?: number; viewDirection?: string };
+      image: { png: () => { toBuffer: () => Promise<Buffer> } };
+    }) => void | Promise<void>,
+  ): void;
+  stop?: () => void;
+};
 
 const MOVEMENT_PACKETS = new Set([
   'position',
@@ -33,20 +50,13 @@ const MOVEMENT_PACKETS = new Set([
   'entity_action',
 ]);
 
-export type NearbyPlayer = {
-  username: string;
-  uuid?: string;
-  distance: number;
-  x: number;
-  y: number;
-  z: number;
-};
-
 export type NotifyFn = (text: string) => void | Promise<void>;
 
 export type BotSessionOptions = {
   id: number;
-  email: string;
+  /** Ник пиратки (offline). */
+  nick: string;
+  /** Пароль для /login /reg на FunTime. */
   password?: string;
   proxy?: ProxyConfig | null;
   reconnect: boolean;
@@ -61,7 +71,6 @@ function chatToText(value: unknown): string {
 
   const obj = value as Record<string, any>;
 
-  // raw NBT: { type, value }
   if (obj.type === 'compound' && obj.value && typeof obj.value === 'object') {
     return chatToText(obj.value);
   }
@@ -100,12 +109,12 @@ function chatToText(value: unknown): string {
 }
 
 /**
- * Классовая сессия mineflayer: лицензия (Microsoft), стабильный онлайн через reconnect.
- * Без капчи и без /login — сервер принимает игрока сразу после входа.
+ * Сессия mineflayer: только пиратка (offline) → FunTime (mc.funtime.su).
+ * Авто /login|/reg + капча (CapMonster, если задан ключ).
  */
 export class BotSession extends EventEmitter {
   readonly id: number;
-  email: string;
+  nick: string;
   password: string;
   proxy: ProxyConfig | null;
   reconnect: boolean;
@@ -123,27 +132,31 @@ export class BotSession extends EventEmitter {
   bot: Bot | null = null;
   inGameName: string | null = null;
 
-  /** Радиус «рядом» (блоки). */
-  nearbyRadius = 64;
-  /** Ники игроков в радиусе (lowercase → display name). */
-  nearbyPlayers = new Map<string, string>();
-
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private nearbyScanTimer: ReturnType<typeof setInterval> | null = null;
   private clickerTimer: ReturnType<typeof setInterval> | null = null;
   private authTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
   private joinSpinToken = 0;
-  /** Последняя причина кика/дисконнекта для сообщения в TG. */
   private lastDisconnectReason: string | null = null;
   private disconnectNotified = false;
-  private msaCodeSent = false;
-  /** Подряд кики «already online» — сессия на прокси не отвалилась. */
   private alreadyOnlineStreak = 0;
+  private captchaSolving = false;
+  private captchaSolved = false;
+  private captchaHandler: InstanceType<typeof FlayerCaptcha> | null = null;
+  /** Уже делали авто /an305→/dm после входа. */
+  private autoDmDone = false;
+  /** AuthMe /login прошёл. */
+  private serverAuthOk = false;
+  /** Бот в хабе (можно /an*). */
+  private hubReady = false;
+  /** Таймер обновления /dm заказов. */
+  private dmRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  private dmEarlyRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private dmRefreshInFlight = false;
 
   constructor(opts: BotSessionOptions) {
     super();
     this.id = opts.id;
-    this.email = opts.email;
+    this.nick = opts.nick.trim();
     this.password = opts.password?.trim() || '';
     this.proxy = opts.proxy ?? null;
     this.reconnect = opts.reconnect;
@@ -163,8 +176,16 @@ export class BotSession extends EventEmitter {
       this.reconnectTimer = null;
     }
 
-    if (!this.email.trim()) {
-      void this.notify(`❌ [#${this.id}] Не задан Microsoft email`);
+    if (!this.nick) {
+      void this.notify(`❌ [#${this.id}] Не задан ник (пиратка)`);
+      return;
+    }
+
+    if (!isValidOfflineNick(this.nick)) {
+      void this.notify(
+        `❌ [#${this.id}] Ник <code>${escapeHtml(this.nick)}</code> невалиден.\n`
+        + `3–16 символов: латиница, цифры, _`,
+      );
       return;
     }
 
@@ -175,53 +196,41 @@ export class BotSession extends EventEmitter {
     this.isProxyDown = false;
     this.isAuthFailed = false;
     this.isClickerOn = false;
+    this.captchaSolving = false;
+    this.captchaSolved = false;
+    this.autoDmDone = false;
     this.stopClickerTimer();
+    this.stopDmRefresh();
     this.lastDisconnectReason = null;
     this.disconnectNotified = false;
-    this.msaCodeSent = false;
     this.inGameName = null;
-    this.nearbyPlayers.clear();
+    this.serverAuthOk = false;
+    this.hubReady = false;
 
-    fs.mkdirSync(path.resolve(PROFILES_FOLDER), { recursive: true });
-
-    // Парольный Microsoft-логин часто ломается (MFA / «try removing the password field»).
-    // Всегда device-code + кэш токенов в profilesFolder.
     const timeoutMin = Math.round(AUTH_TIMEOUT_MS / 60_000);
     void this.notify(
-      `🔄 [#${this.id}] Подключаюсь (${this.email})...\n`
-      + `Ожидай код Microsoft в этом чате (если токен ещё не сохранён).\n`
-      + `⏱ Таймаут: ${timeoutMin} мин. На сервере должен быть доступ к login.live.com / xboxlive.com.`,
+      `🔄 [#${this.id}] FunTime пиратка <b>${escapeHtml(this.nick)}</b>...\n`
+      + `<code>${MC_HOST}:${MC_PORT}</code> · offline\n`
+      + (captchaEnabled()
+        ? 'Капча: CapMonster вкл'
+        : '⚠️ CAPMONSTER_API_KEY не задан — капчу не решу')
+      + `\n⏱ Таймаут: ${timeoutMin} мин.`,
     );
 
     this.armAuthTimeout();
 
     const botOptions: Record<string, unknown> = {
-      username: this.email,
-      auth: 'microsoft',
-      profilesFolder: path.resolve(PROFILES_FOLDER),
+      username: this.nick,
+      // Явно offline — без Microsoft / лицензии
+      auth: 'offline',
       version: MC_VERSION,
       host: MC_HOST,
       port: MC_PORT,
       physicsEnabled: false,
       brand: 'vanilla',
       keepAlive: true,
-      viewDistance: 10,
+      viewDistance: 2,
       hideErrors: true,
-      onMsaCode: (data: { user_code?: string; verification_uri?: string; message?: string }) => {
-        this.msaCodeSent = true;
-        const code = data.user_code ?? '?';
-        const uri = data.verification_uri ?? 'https://www.microsoft.com/link';
-        const hint = data.message || `Открой ${uri} и введи код ${code}`;
-        logger.info(`[bot #${this.id}] MSA code: ${code}`);
-        void this.notify(
-          `🔐 [#${this.id}] Microsoft auth\n`
-          + `<code>${escapeHtml(hint)}</code>\n`
-          + `Код: <code>${escapeHtml(code)}</code>\n`
-          + `Ссылка: ${uri}\n\n`
-          + `После ввода кода бот ждёт ответ Microsoft — это может занять до пары минут.\n`
-          + `Если зависло: на сервере проверь исходящий HTTPS к Microsoft, или нажми «Отменить».`,
-        );
-      },
     };
 
     if (hasProxy(this.proxy)) {
@@ -231,6 +240,8 @@ export class BotSession extends EventEmitter {
     try {
       this.bot = mineflayer.createBot(botOptions as any);
       this.bindClientGuards();
+      attachFuntimeAuth(this.bot, this.password, this.id);
+      this.attachCaptcha();
       this.bindEvents();
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
@@ -245,10 +256,16 @@ export class BotSession extends EventEmitter {
   quit(disableReconnect = false) {
     if (disableReconnect) this.reconnect = false;
     this.stopped = true;
-    this.joinSpinToken += 1; // прервать плавный поворот
+    this.joinSpinToken += 1;
     this.clearAuthTimeout();
     this.stopClicker(false);
-    this.stopNearbyScan();
+    this.stopDmRefresh();
+    try {
+      this.captchaHandler?.stop?.();
+    } catch {
+      // ignore
+    }
+    this.captchaHandler = null;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -260,10 +277,55 @@ export class BotSession extends EventEmitter {
     }
   }
 
-  /**
-   * Медленный поворот на 360° look-пакетами с человеческим темпом
-   * (не мгновенный snap yaw).
-   */
+  private attachCaptcha() {
+    const bot = this.bot;
+    if (!bot || !captchaEnabled()) return;
+
+    try {
+      this.captchaHandler = new FlayerCaptcha(bot, { delay: 10, isStopped: false });
+      this.captchaHandler.on('imageReady', async ({ data, image }) => {
+        if (this.stopped || this.captchaSolved || this.captchaSolving) return;
+        if (data.facing && data.facing !== 'forward') return;
+
+        this.captchaSolving = true;
+        try {
+          const buffer = await image.png().toBuffer();
+          const image64 = buffer.toString('base64');
+          logger.info(`[bot #${this.id}] captcha image ready, solving...`);
+          void this.notify(`🧩 [#${this.id}] Капча — отправляю в CapMonster...`);
+
+          const ans = await solveFuntimeCaptcha(image64);
+          if (!ans || this.stopped || !this.bot) {
+            void this.notify(`❌ [#${this.id}] Капча не решена`);
+            return;
+          }
+
+          this.captchaSolved = true;
+          logger.info(`[bot #${this.id}] captcha answer: ${ans}`);
+          this.bot.chat(ans);
+          void this.notify(`✅ [#${this.id}] Капча: <code>${escapeHtml(ans)}</code>`);
+          // После капчи хаб может уже быть — ждём links, иначе fallback через 12с
+          this.tryScheduleAn305();
+          setTimeout(() => {
+            if (this.autoDmDone || this.stopped) return;
+            if (!this.hubReady) {
+              this.hubReady = true;
+              logger.info(`[bot #${this.id}] hub ready fallback after captcha`);
+              this.tryScheduleAn305();
+            }
+          }, 12_000);
+        } catch (error) {
+          logger.error(`[bot #${this.id}] captcha solve error`, error);
+          void this.notify(`❌ [#${this.id}] Ошибка решения капчи`);
+        } finally {
+          this.captchaSolving = false;
+        }
+      });
+    } catch (error) {
+      logger.error(`[bot #${this.id}] FlayerCaptcha init failed`, error);
+    }
+  }
+
   private async smoothSpin360() {
     const bot = this.bot;
     if (!bot?.entity || !this.isSpawned || this.stopped) return;
@@ -272,10 +334,8 @@ export class BotSession extends EventEmitter {
     const startYaw = bot.entity.yaw;
     const basePitch = bot.entity.pitch;
     const duration = JOIN_SPIN_MS;
-    // ~человеческий look rate: ~15–20 обновлений/сек, не каждый тик сервера пачкой
-    const stepMs = 55 + Math.floor(Math.random() * 25); // 55–80ms
+    const stepMs = 55 + Math.floor(Math.random() * 25);
     const steps = Math.max(24, Math.round(duration / stepMs));
-    // Случайное направление (по/против часовой)
     const dir = Math.random() < 0.5 ? 1 : -1;
 
     logger.info(`[bot #${this.id}] join spin start (${duration}ms, steps=${steps})`);
@@ -286,14 +346,11 @@ export class BotSession extends EventEmitter {
       }
 
       const t = i / steps;
-      // ease-in-out: медленнее в начале/конце, как у игрока
       const eased = t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2;
       const yaw = startYaw + dir * Math.PI * 2 * eased;
-      // крошечный шум pitch — не «идеальная» ось бота
       const pitch = basePitch + Math.sin(t * Math.PI * 2) * 0.02;
 
       try {
-        // force=true: мы сами задаём темп задержками; physics у нас выключен
         await this.bot.look(yaw, pitch, true);
       } catch {
         return;
@@ -303,7 +360,6 @@ export class BotSession extends EventEmitter {
       await sleep(Math.max(40, jitter));
     }
 
-    // Вернуть pitch ближе к исходному
     if (token === this.joinSpinToken && this.bot?.entity && !this.stopped) {
       try {
         await this.bot.look(this.bot.entity.yaw, basePitch, true);
@@ -319,15 +375,12 @@ export class BotSession extends EventEmitter {
     this.clearAuthTimeout();
     this.authTimeoutTimer = setTimeout(() => {
       if (this.isSpawned || this.stopped) return;
-      const hint = this.msaCodeSent
-        ? 'код был выдан, но вход не завершился (истёк / сеть сервера не достучалась до Microsoft)'
-        : 'код Microsoft так и не пришёл (сеть сервера / firewall / блокировка login.live.com)';
-      logger.warn(`[bot #${this.id}] auth timeout | ${hint}`);
+      logger.warn(`[bot #${this.id}] connect timeout`);
       this.isAuthFailed = true;
       this.reconnect = false;
       void this.notify(
-        `⏰ [#${this.id}] Таймаут авторизации\n${hint}\n`
-        + `На VPS нужен исходящий HTTPS к Microsoft. Затем снова «Включить».`,
+        `⏰ [#${this.id}] Таймаут входа на FunTime.\n`
+        + `Проверь ник/пароль, прокси и CapMonster ключ.`,
       );
       this.quit(true);
     }, AUTH_TIMEOUT_MS);
@@ -351,7 +404,392 @@ export class BotSession extends EventEmitter {
     }
   }
 
-  /** Включить автокликер ПКМ (activate/deactivate предмета в руке). */
+  /**
+   * /dm → клик по золотому слитку → дамп следующего окна с предметами.
+   */
+  async runDm(
+    timeoutMs = 15_000,
+    opts?: { quiet?: boolean },
+  ): Promise<
+    { ok: true; text: string } | { ok: false; reason: 'offline' | 'timeout' | 'fail'; error?: string }
+  > {
+    const bot = this.bot;
+    if (!bot || !this.isActive) return { ok: false, reason: 'offline' };
+
+    try {
+      if (bot.currentWindow) {
+        try {
+          bot.closeWindow(bot.currentWindow);
+        } catch {
+          // ignore
+        }
+        await sleep(300);
+      }
+
+      const first = await this.waitForWindow(timeoutMs, () => {
+        logger.info(`[bot #${this.id}] chat /dm`);
+        bot.chat('/dm');
+      });
+
+      await sleep(500);
+      const goldSlot = findGoldIngotSlot(first);
+      if (goldSlot == null) {
+        const listed = listWindowItemNames(first);
+        logger.warn(`[bot #${this.id}] gold_ingot not found in /dm window`);
+        return {
+          ok: false,
+          reason: 'fail',
+          error: `золотой слиток не найден\n${listed}`,
+        };
+      }
+
+      logger.info(`[bot #${this.id}] click gold_ingot slot #${goldSlot}`);
+      if (!opts?.quiet) {
+        void this.notify(`🪙 [#${this.id}] Жму золотой слиток (слот <code>${goldSlot}</code>)...`);
+      }
+
+      const second = await this.waitForWindow(timeoutMs, async () => {
+        // left click, normal mode
+        await bot.clickWindow(goldSlot, 0, 0);
+      }, { ignoreCurrent: true });
+
+      await sleep(700);
+      // close/open race: ждём стабильное currentWindow от сервера
+      for (let i = 0; i < 10 && !bot.currentWindow; i++) {
+        await sleep(200);
+      }
+      const win = bot.currentWindow ?? second;
+      if (!bot.currentWindow) {
+        logger.warn(`[bot #${this.id}] currentWindow empty after /dm orders open — using captured window`);
+      }
+      const refreshSlot = findDmRefreshSlot(win);
+      if (refreshSlot != null) {
+        logger.info(`[bot #${this.id}] /dm refresh button slot #${refreshSlot}`);
+      } else {
+        logger.warn(`[bot #${this.id}] /dm refresh button not found yet`);
+        logger.warn(`[bot #${this.id}] slots:\n${listWindowItemNames(win)}`);
+      }
+      const text = formatWindowDumpChunks(win, this.id, {
+        header: `🗂 [#${this.id}] После /dm → клик по золотому слитку`,
+        dmOrders: true,
+        withLore: true,
+      }).join('\n\n---\n\n');
+
+      return { ok: true, text };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg === 'timeout') return { ok: false, reason: 'timeout' };
+      logger.error(`[bot #${this.id}] runDm failed`, error);
+      return { ok: false, reason: 'fail', error: msg };
+    }
+  }
+
+  /**
+   * Обновление через кнопку в GUI (без повторного /dm).
+   * Если окна/кнопки нет — полный reopen.
+   */
+  async refreshDmViaButton(): Promise<
+    { ok: true; text: string } | { ok: false; reason: 'offline' | 'timeout' | 'fail'; error?: string }
+  > {
+    const bot = this.bot;
+    if (!bot || !this.isActive) return { ok: false, reason: 'offline' };
+
+    let win = bot.currentWindow;
+    if (!win) {
+      logger.info(`[bot #${this.id}] no window — full /dm reopen`);
+      return this.runDm(15_000, { quiet: true });
+    }
+
+    const refreshSlot = findDmRefreshSlot(win);
+    if (refreshSlot == null) {
+      const listed = listWindowItemNames(win);
+      logger.warn(`[bot #${this.id}] refresh button missing — slots:\n${listed}`);
+      return this.runDm(15_000, { quiet: true });
+    }
+
+    try {
+      const prevId = (win as any)?.id;
+      logger.info(`[bot #${this.id}] click refresh slot #${refreshSlot}`);
+      // FunTime на «Обновить» часто шлёт close_window + open_window
+      const updated = await this.waitForWindow(
+        10_000,
+        async () => {
+          await bot.clickWindow(refreshSlot, 0, 0);
+        },
+        { ignoreCurrent: true },
+      ).catch(async () => {
+        await sleep(1_200);
+        return bot.currentWindow;
+      });
+
+      win = updated ?? bot.currentWindow;
+      if (!win) {
+        logger.warn(`[bot #${this.id}] window gone after refresh — full /dm reopen`);
+        return this.runDm(15_000, { quiet: true });
+      }
+      if ((win as any)?.id === prevId) {
+        await sleep(600);
+        win = bot.currentWindow ?? win;
+      }
+      const text = formatWindowDumpChunks(win, this.id, {
+        header: `🗂 [#${this.id}] /dm обновлено кнопкой`,
+        dmOrders: true,
+        withLore: true,
+      }).join('\n\n---\n\n');
+      return { ok: true, text };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      logger.error(`[bot #${this.id}] refresh click failed`, error);
+      return { ok: false, reason: 'fail', error: msg };
+    }
+  }
+
+  /** Ждёт открытия GUI. Если ignoreCurrent — игнорит уже открытое окно до нового. */
+  private waitForWindow(
+    timeoutMs: number,
+    trigger: () => void | Promise<void>,
+    opts?: { ignoreCurrent?: boolean },
+  ): Promise<import('prismarine-windows').Window> {
+    const bot = this.bot!;
+    const prevId = opts?.ignoreCurrent ? (bot.currentWindow as any)?.id : null;
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+
+      const settleOk = (window: import('prismarine-windows').Window, via: string) => {
+        if (settled) return;
+        if (opts?.ignoreCurrent && (window as any)?.id === prevId) return;
+        settled = true;
+        cleanup();
+        logger.info(`[bot #${this.id}] window opened via ${via}`);
+        resolve(window);
+      };
+
+      const timer = setTimeout(() => {
+        if (settled) return;
+        const cur = bot.currentWindow;
+        if (cur && (!opts?.ignoreCurrent || (cur as any).id !== prevId)) {
+          settleOk(cur, 'currentWindow-timeout');
+          return;
+        }
+        settled = true;
+        cleanup();
+        logger.warn(`[bot #${this.id}] window timeout`);
+        reject(new Error('timeout'));
+      }, timeoutMs);
+
+      const finish = async (window: import('prismarine-windows').Window, via: string) => {
+        await sleep(500);
+        if (settled) return;
+        const w = bot.currentWindow ?? window;
+        settleOk(w, via);
+      };
+
+      const onOpen = (window: import('prismarine-windows').Window) => {
+        void finish(window, 'windowOpen');
+      };
+
+      const onPacket = () => {
+        if (!bot.currentWindow) return;
+        if (opts?.ignoreCurrent && (bot.currentWindow as any).id === prevId) return;
+        void finish(bot.currentWindow, 'open_window packet');
+      };
+
+      const cleanup = () => {
+        clearTimeout(timer);
+        bot.removeListener('windowOpen', onOpen);
+        bot._client.removeListener('open_window', onPacket);
+        bot._client.removeListener('open_screen', onPacket);
+      };
+
+      bot.on('windowOpen', onOpen);
+      bot._client.on('open_window', onPacket);
+      bot._client.on('open_screen', onPacket);
+
+      void Promise.resolve(trigger()).catch((err) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(err);
+      });
+    });
+  }
+
+  /** Ждём следующий spawn (телепорт на режим) или таймаут. */
+  private waitNextSpawn(timeoutMs: number): Promise<boolean> {
+    const bot = this.bot;
+    if (!bot) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (ok: boolean) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        bot.removeListener('spawn', onSpawn);
+        resolve(ok);
+      };
+      const timer = setTimeout(() => finish(false), timeoutMs);
+      const onSpawn = () => finish(true);
+      bot.once('spawn', onSpawn);
+    });
+  }
+
+  /** Хаб+капча готовы → /an305 → spawn → /dm. */
+  private tryScheduleAn305() {
+    if (this.autoDmDone || this.stopped) return;
+    if (!this.isSpawned || !this.isActive) return;
+    if (captchaEnabled() && !this.captchaSolved) {
+      logger.info(`[bot #${this.id}] wait captcha before /an305`);
+      return;
+    }
+    if (!this.hubReady) {
+      logger.info(`[bot #${this.id}] wait hub before /an305`);
+      return;
+    }
+
+    this.autoDmDone = true;
+    logger.info(`[bot #${this.id}] schedule /an305 in 2s (hub ready)`);
+    setTimeout(() => {
+      if (this.stopped || !this.isActive || !this.isSpawned) return;
+      void this.runAn305ThenDm();
+    }, 2_000);
+  }
+
+  /** Заход на режим /an305, ждём телепорт, затем /dm + дамп окна. */
+  async runAn305ThenDm() {
+    const bot = this.bot;
+    if (!bot || !this.isActive || !this.isSpawned) {
+      void this.notify(`❌ [#${this.id}] /an305: бот оффлайн`);
+      return;
+    }
+
+    void this.notify(`⚔ [#${this.id}] Пишу <code>/an305</code>...`);
+    try {
+      bot.chat('/an305');
+      logger.info(`[bot #${this.id}] chat /an305`);
+    } catch (error) {
+      logger.error(`[bot #${this.id}] /an305 failed`, error);
+      void this.notify(`❌ [#${this.id}] Не удалось отправить /an305`);
+      return;
+    }
+
+    const chatBuf: string[] = [];
+    const onChat = (msg: string) => {
+      const line = String(msg ?? '').trim();
+      if (!line) return;
+      chatBuf.push(line);
+      logger.info(`[bot #${this.id}] chat: ${line.slice(0, 160)}`);
+    };
+    bot.on('messagestr', onChat);
+
+    const gotSpawn = await this.waitNextSpawn(20_000);
+    logger.info(`[bot #${this.id}] after /an305 spawn=${gotSpawn}`);
+
+    if (!gotSpawn) {
+      bot.off('messagestr', onChat);
+      const hint = chatBuf.slice(-5).map(escapeHtml).join('\n') || 'нет ответа сервера';
+      void this.notify(
+        `❌ [#${this.id}] Не зашёл на /an305 (нет spawn).\n`
+        + `Чат:\n<code>${hint.slice(0, 800)}</code>`,
+      );
+      return;
+    }
+
+    await sleep(2_500);
+    if (this.stopped || !this.isActive) {
+      bot.off('messagestr', onChat);
+      return;
+    }
+
+    void this.notify(`📨 [#${this.id}] На /an305 — пишу <code>/dm</code>...`);
+    const result = await this.runDm();
+    bot.off('messagestr', onChat);
+
+    if (result.ok) {
+      if (result.text.trim()) void this.notify(result.text);
+      this.startDmRefresh();
+      return;
+    }
+    const hint = chatBuf.slice(-8).map(escapeHtml).join('\n') || '—';
+    if (result.reason === 'timeout') {
+      void this.notify(
+        `⏰ [#${this.id}] /dm: окно не открылось.\nЧат:\n<code>${hint.slice(0, 800)}</code>`,
+      );
+      return;
+    }
+    void this.notify(
+      `❌ [#${this.id}] /dm ошибка:\n<code>${escapeHtml((result.error ?? result.reason).slice(0, 800))}</code>`,
+    );
+  }
+
+  /** Каждые 20с: кнопка «Обновить» если окно живо, иначе тихий reopen /dm. */
+  private startDmRefresh() {
+    this.stopDmRefresh();
+    logger.info(`[bot #${this.id}] /dm refresh every 20s, alert ratio >800k`);
+    void this.notify(
+      `🔁 [#${this.id}] /dm каждые 20с · оповещения только при курсе &gt; <code>800,000</code>`,
+    );
+    this.dmRefreshTimer = setInterval(() => {
+      void this.refreshDmOrders();
+    }, 20_000);
+  }
+
+  private stopDmRefresh() {
+    if (this.dmRefreshTimer) {
+      clearInterval(this.dmRefreshTimer);
+      this.dmRefreshTimer = null;
+    }
+    if (this.dmEarlyRefreshTimer) {
+      clearTimeout(this.dmEarlyRefreshTimer);
+      this.dmEarlyRefreshTimer = null;
+    }
+    this.dmRefreshInFlight = false;
+  }
+
+  private async refreshDmOrders() {
+    if (this.dmRefreshInFlight || this.stopped || !this.isActive || !this.isSpawned) return;
+    this.dmRefreshInFlight = true;
+    try {
+      logger.info(`[bot #${this.id}] /dm refresh tick (button)`);
+      const result = await this.refreshDmViaButton();
+      if (result.ok) {
+        if (result.text.trim()) {
+          void this.notify(result.text);
+        } else {
+          logger.info(`[bot #${this.id}] /dm refresh: no lots with ratio >800k`);
+        }
+      } else {
+        logger.warn(`[bot #${this.id}] /dm refresh failed: ${result.reason} ${result.error ?? ''}`);
+      }
+    } catch (error) {
+      logger.error(`[bot #${this.id}] /dm refresh error`, error);
+    } finally {
+      this.dmRefreshInFlight = false;
+    }
+  }
+
+  async runDmAndNotify() {
+    void this.notify(`📨 [#${this.id}] Пишу <code>/dm</code>...`);
+    const result = await this.runDm();
+    if (result.ok) {
+      if (result.text.trim()) void this.notify(result.text);
+      else void this.notify(`✅ [#${this.id}] /dm открыт · лотов с курсом &gt;800к нет`);
+      this.startDmRefresh();
+      return;
+    }
+    if (result.reason === 'offline') {
+      void this.notify(`❌ [#${this.id}] /dm: бот оффлайн`);
+      return;
+    }
+    if (result.reason === 'timeout') {
+      void this.notify(`⏰ [#${this.id}] /dm: окно не открылось`);
+      return;
+    }
+    void this.notify(
+      `❌ [#${this.id}] /dm ошибка: <code>${escapeHtml(result.error ?? 'fail')}</code>`,
+    );
+  }
+
   startClicker(): 'ok' | 'offline' | 'already' | 'fail' {
     const bot = this.bot;
     if (!bot || !this.isActive || !this.isSpawned) return 'offline';
@@ -370,7 +808,6 @@ export class BotSession extends EventEmitter {
     }
   }
 
-  /** Выключить автокликер. */
   stopClicker(notify = true): 'ok' | 'offline' | 'not_running' | 'fail' {
     this.stopClickerTimer();
     if (!this.isClickerOn) return 'not_running';
@@ -385,7 +822,6 @@ export class BotSession extends EventEmitter {
     return this.bot && this.isActive ? 'ok' : 'offline';
   }
 
-  /** Обновить CPS на лету (если кликер включён — перезапускает таймер). */
   setClickerCps(cps: number) {
     this.clickerCps = clampCps(cps);
     if (this.isClickerOn) this.armClickerTimer();
@@ -404,7 +840,6 @@ export class BotSession extends EventEmitter {
     }
   }
 
-  /** Один клик ПКМ: use item → release. */
   private clickOnce() {
     const bot = this.bot;
     if (!bot || !this.isClickerOn || !this.isActive || !this.isSpawned) {
@@ -414,7 +849,6 @@ export class BotSession extends EventEmitter {
 
     try {
       bot.activateItem();
-      // Короткий импульс «клика», не удержание
       setTimeout(() => {
         if (!this.bot || !this.isClickerOn) return;
         try {
@@ -426,84 +860,6 @@ export class BotSession extends EventEmitter {
     } catch (error) {
       logger.warn(`[bot #${this.id}] RMB click failed`, error);
     }
-  }
-
-  /**
-   * Игроки в радиусе видимости (есть entity у player).
-   * Дистанция — евклидово расстояние от бота.
-   */
-  getNearbyPlayers(radius = this.nearbyRadius): NearbyPlayer[] {
-    const bot = this.bot;
-    if (!bot?.entity?.position) return [];
-
-    const selfName = bot.username?.toLowerCase();
-    const origin = bot.entity.position;
-    const result: NearbyPlayer[] = [];
-    const seen = new Set<string>();
-
-    // Надёжнее: tab-list + entity в прогрузке
-    for (const player of Object.values(bot.players)) {
-      const username = player?.username;
-      if (!username || username.toLowerCase() === selfName) continue;
-      const entity = player.entity;
-      if (!entity?.position) continue;
-
-      const distance = origin.distanceTo(entity.position);
-      if (distance > radius) continue;
-
-      const key = username.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-
-      result.push({
-        username,
-        uuid: player.uuid,
-        distance: Math.round(distance * 10) / 10,
-        x: Math.round(entity.position.x * 10) / 10,
-        y: Math.round(entity.position.y * 10) / 10,
-        z: Math.round(entity.position.z * 10) / 10,
-      });
-    }
-
-    // Fallback по entities (на случай рассинхрона players)
-    for (const entity of Object.values(bot.entities)) {
-      if (!entity || entity.type !== 'player') continue;
-      const username = entity.username;
-      if (!username || username.toLowerCase() === selfName) continue;
-      if (!entity.position) continue;
-
-      const key = username.toLowerCase();
-      if (seen.has(key)) continue;
-
-      const distance = origin.distanceTo(entity.position);
-      if (distance > radius) continue;
-      seen.add(key);
-
-      result.push({
-        username,
-        uuid: entity.uuid,
-        distance: Math.round(distance * 10) / 10,
-        x: Math.round(entity.position.x * 10) / 10,
-        y: Math.round(entity.position.y * 10) / 10,
-        z: Math.round(entity.position.z * 10) / 10,
-      });
-    }
-
-    result.sort((a, b) => a.distance - b.distance);
-    return result;
-  }
-
-  formatNearbyList(radius = this.nearbyRadius): string {
-    const list = this.getNearbyPlayers(radius);
-    if (list.length === 0) {
-      return `👁 [#${this.id}] Рядом никого (радиус ${radius})`;
-    }
-    const lines = list.map(
-      (p, i) =>
-        `${i + 1}. <b>${escapeHtml(p.username)}</b> — ${p.distance}м`
-        + ` <code>${p.x} ${p.y} ${p.z}</code>`,
-    );
-    return `👁 [#${this.id}] Игроки рядом (${list.length}, ≤${radius}м):\n${lines.join('\n')}`;
   }
 
   private async createProxyConnection(client: Client) {
@@ -574,7 +930,7 @@ export class BotSession extends EventEmitter {
       this.isConnect = false;
       this.isActive = true;
       this.inGameName = bot.username;
-      void this.notify(`✅ [#${this.id}] Онлайн как <b>${bot.username}</b>`);
+      void this.notify(`✅ [#${this.id}] Онлайн (пиратка) как <b>${bot.username}</b>`);
       this.emit('online', bot.username);
     });
 
@@ -585,30 +941,46 @@ export class BotSession extends EventEmitter {
       this.inGameName = bot.username;
       logger.info(`[bot #${this.id}] spawn @ ${bot.username}`);
       this.emit('spawn');
-      this.startNearbyScan();
-      // Небольшая пауза после спавна — как игрок осматривается
-      setTimeout(() => {
-        void this.smoothSpin360();
-      }, 800 + Math.floor(Math.random() * 700));
+      // без капчи можно сразу планировать режим
+      if (!captchaEnabled()) this.captchaSolved = true;
+      this.tryScheduleAn305();
     });
 
-    // Мгновенная реакция на появление entity игрока
-    bot.on('entitySpawn', (entity) => {
-      if (entity?.type === 'player' || entity?.username) {
-        this.refreshNearby();
+    bot.on('windowClose', (window) => {
+      const title = stripMinecraftText((window as any)?.title) || '';
+      logger.info(
+        `[bot #${this.id}] windowClose id=${(window as any)?.id ?? '?'} title=${title.slice(0, 80) || '(none)'}`,
+      );
+    });
+
+    bot.on('messagestr', (msg) => {
+      const textMsg = String(msg ?? '');
+      const low = textMsg.toLowerCase();
+      if (
+        low.includes('успешно')
+        || low.includes('авторизован')
+        || low.includes('добро пожаловать')
+      ) {
+        if (!this.serverAuthOk) {
+          this.serverAuthOk = true;
+          logger.info(`[bot #${this.id}] server auth ok: ${textMsg.slice(0, 80)}`);
+        }
       }
-    });
-    bot.on('entityUpdate', (entity) => {
-      if (entity?.type === 'player' || entity?.username) {
-        this.refreshNearby();
-      }
-    });
-    bot.on('playerUpdated', () => {
-      this.refreshNearby();
-    });
-    bot.on('entityGone', (entity) => {
-      if (entity?.type === 'player' || entity?.username) {
-        this.refreshNearby();
+
+      // Хаб FunTime: можно писать /an*
+      if (
+        !this.hubReady
+        && (
+          /социальн/i.test(textMsg)
+          || /\/links/i.test(textMsg)
+          || /выберите режим/i.test(textMsg)
+          || /компас/i.test(textMsg)
+          || /анархи/i.test(textMsg)
+        )
+      ) {
+        this.hubReady = true;
+        logger.info(`[bot #${this.id}] hub ready: ${textMsg.slice(0, 100)}`);
+        this.tryScheduleAn305();
       }
     });
 
@@ -619,7 +991,6 @@ export class BotSession extends EventEmitter {
       this.notifyDisconnect(`🚪 [#${this.id}] Кикнут с сервера\n<code>${escapeHtml(text.slice(0, 500))}</code>`);
     });
 
-    // Сырой пакет disconnect (часто приходит вместо/раньше kicked)
     bot._client.on('disconnect', (packet: { reason?: unknown }) => {
       const text = chatToText(packet?.reason) || 'disconnect packet';
       this.lastDisconnectReason = `disconnect: ${text}`;
@@ -631,23 +1002,21 @@ export class BotSession extends EventEmitter {
       if (!this.lastDisconnectReason) {
         this.lastDisconnectReason = `error: ${err.message}`;
       }
-      const msg = err.message.toLowerCase();
-      if (msg.includes('authentication') || msg.includes('sign in failed')) {
-        this.isAuthFailed = true;
-        this.reconnect = false;
-        void this.notify(
-          `❌ [#${this.id}] Microsoft auth failed.\nВ настройках очисти пароль (отправь "-") и включи снова — придёт device-code.`,
-        );
-      }
     });
 
     bot.once('end', (reason?: string) => {
       this.joinSpinToken += 1;
       this.clearAuthTimeout();
       this.stopClicker(false);
-      this.stopNearbyScan();
+      this.stopDmRefresh();
       this.isConnect = false;
       this.isActive = false;
+      try {
+        this.captchaHandler?.stop?.();
+      } catch {
+        // ignore
+      }
+      this.captchaHandler = null;
 
       const endReason = reason?.trim() || 'no reason';
       const detail = this.lastDisconnectReason
@@ -655,7 +1024,6 @@ export class BotSession extends EventEmitter {
         : `end: ${endReason}`;
       logger.warn(`[bot #${this.id}] end | ${detail}`);
 
-      // Если kicked уже уведомил — не дублируем, иначе шлём полный end
       if (!this.disconnectNotified) {
         this.notifyDisconnect(
           `❗ [#${this.id}] Отключён\n<code>${escapeHtml(detail.slice(0, 500))}</code>`,
@@ -673,57 +1041,6 @@ export class BotSession extends EventEmitter {
     void this.notify(text);
   }
 
-  private startNearbyScan() {
-    this.stopNearbyScan();
-    this.refreshNearby();
-    this.nearbyScanTimer = setInterval(() => this.refreshNearby(), 1_000);
-    logger.info(`[bot #${this.id}] nearby scan started (radius=${this.nearbyRadius})`);
-  }
-
-  private stopNearbyScan() {
-    if (this.nearbyScanTimer) {
-      clearInterval(this.nearbyScanTimer);
-      this.nearbyScanTimer = null;
-    }
-    this.nearbyPlayers.clear();
-  }
-
-  /**
-   * Постоянный скан пока аккаунт онлайн.
-   * Новый игрок в радиусе → TG: ник + расстояние.
-   */
-  private refreshNearby() {
-    if (!this.bot?.entity?.position || !this.isSpawned || this.stopped) return;
-
-    const current = this.getNearbyPlayers();
-    const next = new Map<string, string>();
-
-    for (const p of current) {
-      const key = p.username.toLowerCase();
-      next.set(key, p.username);
-
-      if (this.nearbyPlayers.has(key)) continue;
-
-      const dist = p.distance.toFixed(1);
-      logger.info(`[bot #${this.id}] nearby detect ${p.username} dist=${dist}`);
-      void this.notify(
-        `👤 [#${this.id}] Обнаружен игрок <b>${escapeHtml(p.username)}</b>\n`
-        + `📏 Расстояние: <b>${dist}</b> м\n`
-        + `📍 <code>${p.x} ${p.y} ${p.z}</code>`,
-      );
-      this.emit('nearbyJoin', p.username, p);
-    }
-
-    for (const [key, name] of this.nearbyPlayers) {
-      if (!next.has(key)) {
-        logger.info(`[bot #${this.id}] nearby left ${name}`);
-        this.emit('nearbyLeave', name);
-      }
-    }
-
-    this.nearbyPlayers = next;
-  }
-
   private scheduleReconnect() {
     if (this.stopped || !this.reconnect || this.isAuthFailed) {
       this.clear();
@@ -731,19 +1048,6 @@ export class BotSession extends EventEmitter {
     }
 
     const reasonText = this.lastDisconnectReason ?? '';
-
-    // Кики DonutSMP, где реконнект только ломает proxy join-cache
-    if (isDonutProxyHardFail(reasonText)) {
-      this.reconnect = false;
-      this.clear();
-      void this.notify(
-        `⛔ [#${this.id}] Реконнект остановлен: security/proxy kick.\n`
-        + `Авто-реконнект тут вреден (получается «already online»).\n`
-        + `Подожди 2–5 мин и нажми «Включить» вручную.`,
-      );
-      return;
-    }
-
     const alreadyOnline = isAlreadyOnlineReason(reasonText);
 
     if (alreadyOnline) {
@@ -753,7 +1057,7 @@ export class BotSession extends EventEmitter {
         this.clear();
         void this.notify(
           `⛔ [#${this.id}] Стоп реконнекта: ${this.alreadyOnlineStreak}× «already online».\n`
-          + `Прокси ещё держит сессию. Подожди 2–5 мин, потом «Включить» вручную.`,
+          + `Подожди 2–5 мин, потом «Включить» вручную.`,
         );
         return;
       }
@@ -786,17 +1090,21 @@ export class BotSession extends EventEmitter {
   clear() {
     this.clearAuthTimeout();
     this.stopClickerTimer();
+    this.stopDmRefresh();
     this.isClickerOn = false;
-    this.stopNearbyScan();
     this.isConnect = false;
     this.isActive = false;
     this.isSpawned = false;
     this.lastDisconnectReason = null;
     this.disconnectNotified = false;
-    this.msaCodeSent = false;
+    this.captchaSolving = false;
+    this.captchaSolved = false;
     this.bot = null;
-    // alreadyOnlineStreak специально НЕ сбрасываем здесь
   }
+}
+
+function isValidOfflineNick(nick: string): boolean {
+  return /^[A-Za-z0-9_]{3,16}$/.test(nick);
 }
 
 function isAlreadyOnlineReason(text: string): boolean {
@@ -806,19 +1114,6 @@ function isAlreadyOnlineReason(text: string): boolean {
     || t.includes('уже онлайн')
     || t.includes('already connected')
     || t.includes('already logged')
-  );
-}
-
-/** Security / внутренний краш proxy DonutSMP — реконнект усугубляет ghost-session. */
-function isDonutProxyHardFail(text: string): boolean {
-  const t = text.toLowerCase();
-  return (
-    t.includes('unauthorized login')
-    || t.includes('confirm the login')
-    || t.includes("don't know what happened")
-    || t.includes('do not know what happened')
-    || t.includes('make a ticket')
-    || t.includes('you should make a ticket')
   );
 }
 

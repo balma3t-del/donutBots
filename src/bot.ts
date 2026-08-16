@@ -23,6 +23,6 @@ export function mainMenuKeyboard(): InlineKeyboard {
 export function clearAwait(ctx: BotContext) {
   ctx.session.awaitKind = null;
   ctx.session.awaitBotId = undefined;
-  ctx.session.draftEmail = undefined;
+  ctx.session.draftNick = undefined;
   ctx.session.draftPassword = undefined;
 }

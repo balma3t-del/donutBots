@@ -7,14 +7,32 @@ import { SessionManager } from './minecraft/SessionManager.js';
 import { logger } from './utils/logger.js';
 
 async function notifyAdmins(text: string) {
+  const parts = splitTelegramHtml(text);
   for (const adminId of ADMIN_IDS) {
-    try {
-      await bot.api.sendMessage(adminId, text, { parse_mode: 'HTML' });
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      logger.warn(`notify admin ${adminId} failed: ${msg}`);
+    for (const part of parts) {
+      try {
+        await bot.api.sendMessage(adminId, part, { parse_mode: 'HTML' });
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        logger.warn(`notify admin ${adminId} failed: ${msg}`);
+      }
     }
   }
+}
+
+/** Режет длинные HTML-сообщения под лимит Telegram (~4096). */
+function splitTelegramHtml(text: string, max = 3500): string[] {
+  if (text.length <= max) return [text];
+  const chunks: string[] = [];
+  let rest = text;
+  while (rest.length > max) {
+    let cut = rest.lastIndexOf('\n', max);
+    if (cut < max * 0.5) cut = max;
+    chunks.push(rest.slice(0, cut));
+    rest = rest.slice(cut).replace(/^\n+/, '');
+  }
+  if (rest) chunks.push(rest);
+  return chunks;
 }
 
 const manager = new SessionManager(notifyAdmins);
@@ -54,7 +72,17 @@ async function main() {
   await bot.api.deleteWebhook({ drop_pending_updates: true }).catch(() => {});
 
   await bot.start({
-    onStart: (info) => logger.info(`TG bot @${info.username} started`),
+    onStart: async (info) => {
+      logger.info(`TG bot @${info.username} started`);
+      if (process.env.AUTO_TURN_ON === '1') {
+        const bots = db.listBots();
+        logger.info(`AUTO_TURN_ON: starting ${bots.length} bot(s)`);
+        for (const record of bots) {
+          const result = await manager.turnOn(record.id);
+          logger.info(`AUTO_TURN_ON #${record.id} → ${result}`);
+        }
+      }
+    },
   });
 }
 
@@ -62,7 +90,7 @@ main().catch((error) => {
   const desc = String((error as any)?.description ?? (error as any)?.message ?? error);
   if (desc.includes('409') || desc.includes('Conflict')) {
     logger.error(
-      'Не удалось стартовать TG: 409 Conflict. Останови все другие копии @donutmcbot и перезапусти.',
+      'Не удалось стартовать TG: 409 Conflict. Останови все другие копии этого BOT_TOKEN и перезапусти.',
     );
   } else {
     logger.error('fatal', error);

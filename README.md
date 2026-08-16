@@ -1,36 +1,26 @@
-# McBotPanel
+# FunTime McBotPanel (только пиратка / offline)
 
-TypeScript-панель для управления mineflayer-ботами через Telegram (только inline-клавиатура).
+TypeScript-панель для mineflayer-ботов на **FunTime** (`mc.funtime.su`) через Telegram inline-клавиатуру.
 
-## Возможности
+## Отличия от Donut-версии
 
-- Классовая сессия `BotSession` (как в MineCraftBot / UndeadShop)
-- Вход с **лицензией** (`auth: 'microsoft'`)
-- Стабильный онлайн: keepAlive + авто-реконнект
-- Без капчи и без `/login` — сразу в игру после коннекта
-- Отправка сообщений/команд в MC-чат из Telegram (чат сервера в TG не транслируется)
-- SOCKS5 прокси (опционально)
+- Вход **только пираткой** (`auth: 'offline'`) — без Microsoft / лицензии
+- Ник + пароль FunTime (`/login` / `/reg` автоматически)
+- Капча через FlayerCaptcha + CapMonster (если задан `CAPMONSTER_API_KEY`)
+- Хост по умолчанию: `mc.funtime.su:25565`
 
-## Запуск через Docker (рекомендуется)
+## Запуск через Docker
 
 ```bash
-# .env уже должен быть заполнен (BOT_TOKEN, ADMIN_IDS, MC_*)
+cp .env.example .env
+# заполни BOT_TOKEN, ADMIN_IDS, CAPMONSTER_API_KEY
 docker compose up -d --build
 docker compose logs -f bot
 ```
 
-Или через npm-скрипты:
+## Локально
 
-```bash
-npm run docker:up
-npm run docker:logs
-```
-
-Данные (SQLite + Microsoft-токены) лежат в `./data` на хосте.
-
-## Локально (без Docker)
-
-Нужен Node 22 (не 24) — иначе `better-sqlite3` часто ломается.
+Нужен Node 22.
 
 ```bash
 cp .env.example .env
@@ -42,4 +32,6 @@ npm run dev
 
 `/start` → Мои боты / Добавить бота
 
-У бота: включить/выключить, настройки (email, пароль, прокси, реконнект), «Отправить в чат».
+Добавление: ник пиратки → пароль FunTime → прокси (или `-`).
+
+У бота: вкл/выкл, чат, игроки рядом, кликер ПКМ, настройки.

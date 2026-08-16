@@ -1,7 +1,7 @@
 {
-  "name": "mcbot-panel",
+  "name": "funtime-bot-panel",
   "version": "1.0.0",
-  "description": "Mineflayer bots with Telegram inline control panel",
+  "description": "FunTime cracked (offline) mineflayer bots with Telegram panel",
   "main": "dist/index.js",
   "type": "module",
   "scripts": {
@@ -15,8 +15,10 @@
   },
   "license": "ISC",
   "dependencies": {
+    "axios": "^1.19.0",
     "better-sqlite3": "^12.8.0",
     "dotenv": "^16.6.1",
+    "flayercaptcha": "^1.0.6",
     "grammy": "^1.44.0",
     "mineflayer": "^4.37.1",
     "socks": "^2.8.4",

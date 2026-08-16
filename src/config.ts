@@ -15,20 +15,22 @@ export const ADMIN_IDS: number[] = (process.env.ADMIN_IDS ?? '')
 
 export const isAdmin = (userId: number): boolean => ADMIN_IDS.includes(userId);
 
-export const MC_HOST = process.env.MC_HOST?.trim() || 'localhost';
+/** FunTime (пиратка / offline). */
+export const MC_HOST = process.env.MC_HOST?.trim() || 'mc.funtime.su';
 export const MC_PORT = Number(process.env.MC_PORT ?? 25565);
-export const MC_VERSION = process.env.MC_VERSION?.trim() || '1.21.1';
-
-export const PROFILES_FOLDER = process.env.PROFILES_FOLDER?.trim() || './data/profiles';
+export const MC_VERSION = process.env.MC_VERSION?.trim() || '1.21.11';
 
 export const RECONNECT_DELAY_MS = Number(process.env.RECONNECT_DELAY_MS ?? 5000);
 export const PROXY_DOWN_RECONNECT_MS = Number(process.env.PROXY_DOWN_RECONNECT_MS ?? 60_000);
-/** Пауза после кика «already online» — прокси ещё держит сессию. */
+/** Пауза после кика «already online». */
 export const ALREADY_ONLINE_RECONNECT_MS = Number(process.env.ALREADY_ONLINE_RECONNECT_MS ?? 60_000);
-/** Сколько раз подряд «already online» — после этого стоп (ручной перезапуск). */
 export const ALREADY_ONLINE_MAX_STREAK = Number(process.env.ALREADY_ONLINE_MAX_STREAK ?? 3);
-/** Таймаут Microsoft auth / коннекта до spawn (мс). Device-code обычно ~15 мин. */
-export const AUTH_TIMEOUT_MS = Number(process.env.AUTH_TIMEOUT_MS ?? 12 * 60_000);
+/** Таймаут коннекта до spawn (мс). */
+export const AUTH_TIMEOUT_MS = Number(process.env.AUTH_TIMEOUT_MS ?? 3 * 60_000);
+
+/** CapMonster для капчи FunTime (опционально). */
+export const CAPMONSTER_API_KEY = process.env.CAPMONSTER_API_KEY?.trim() || '';
+export const CAPMONSTER_PROXY = process.env.CAPMONSTER_PROXY?.trim() || '';
 
 /** CPS кликера ПКМ по умолчанию (1–20). */
 export const DEFAULT_CLICKER_CPS = clampCps(Number(process.env.CLICKER_CPS ?? 10));

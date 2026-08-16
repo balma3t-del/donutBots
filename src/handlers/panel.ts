@@ -1,7 +1,7 @@
 import { InlineKeyboard } from 'grammy';
 import type { BotContext } from '../bot.js';
 import { clearAwait, mainMenuKeyboard } from '../bot.js';
-import { isAdmin } from '../config.js';
+import { isAdmin, MC_HOST, MC_PORT } from '../config.js';
 import { db } from '../database/db.js';
 import type { SessionManager } from '../minecraft/SessionManager.js';
 import { formatProxy, parseProxy } from '../utils/proxy.js';
@@ -40,9 +40,10 @@ function botCardText(bot: BotRecord, manager: SessionManager): string {
   const lines = [
     `<b>${botTitle(bot, manager)}</b>`,
     `ID: <code>${bot.id}</code>`,
+    `Сервер: <code>${MC_HOST}:${MC_PORT}</code> (пиратка)`,
     `Статус: <b>${status}</b>`,
-    `Email: <code>${bot.email || '—'}</code>`,
-    `Пароль: ${bot.password ? 'задан' : 'не задан (device code)'}`,
+    `Ник: <code>${bot.email || '—'}</code>`,
+    `Пароль /login: ${bot.password ? 'задан' : 'не задан'}`,
     `Прокси: <code>${formatProxy({
       host: bot.proxyHost,
       port: bot.proxyPort,
@@ -52,7 +53,7 @@ function botCardText(bot: BotRecord, manager: SessionManager): string {
     `Автореконнект: ${bot.reconnect ? 'вкл' : 'выкл'}`,
     `Кликер ПКМ: ${session?.isClickerOn ? 'вкл' : 'выкл'} · ${session?.clickerCps ?? bot.clickerCps} CPS`,
   ];
-  if (session?.inGameName) lines.splice(3, 0, `Ник: <b>${session.inGameName}</b>`);
+  if (session?.inGameName) lines.splice(4, 0, `В игре: <b>${session.inGameName}</b>`);
   return lines.join('\n');
 }
 
@@ -70,10 +71,10 @@ function botActionsKeyboard(bot: BotRecord, manager: SessionManager): InlineKeyb
   }
   kb.row()
     .text('Отправить в чат', `bot:${bot.id}:chat`)
-    .text('Игроки рядом', `bot:${bot.id}:nearby`)
     .row();
 
   if (status === 'online') {
+    kb.text('/an305 → /dm', `bot:${bot.id}:dm`).row();
     const clickerOn = manager.isClickerOn(bot.id);
     kb.text(clickerOn ? 'Выкл кликер ПКМ' : 'Вкл кликер ПКМ', `bot:${bot.id}:clicker`)
       .row();
@@ -88,7 +89,7 @@ function botActionsKeyboard(bot: BotRecord, manager: SessionManager): InlineKeyb
 
 function settingsKeyboard(bot: BotRecord): InlineKeyboard {
   return new InlineKeyboard()
-    .text(bot.email ? 'Email ✓' : 'Email ✗', `bot:${bot.id}:set:email`)
+    .text(bot.email ? 'Ник ✓' : 'Ник ✗', `bot:${bot.id}:set:nick`)
     .text(bot.password ? 'Пароль ✓' : 'Пароль ✗', `bot:${bot.id}:set:password`)
     .row()
     .text(bot.proxyHost ? 'Прокси ✓' : 'Прокси ✗', `bot:${bot.id}:set:proxy`)
@@ -136,6 +137,10 @@ function ensureAdmin(ctx: BotContext): boolean {
   return Boolean(id && isAdmin(id));
 }
 
+function isValidNick(nick: string): boolean {
+  return /^[A-Za-z0-9_]{3,16}$/.test(nick);
+}
+
 export function registerPanel(bot: import('grammy').Bot<BotContext>, manager: SessionManager) {
   bot.command('start', async (ctx) => {
     if (!ensureAdmin(ctx)) {
@@ -143,7 +148,8 @@ export function registerPanel(bot: import('grammy').Bot<BotContext>, manager: Se
       return;
     }
     clearAwait(ctx);
-    await ctx.reply('Панель управления ботами', {
+    await ctx.reply(`FunTime панель (только пиратка)\n<code>${MC_HOST}:${MC_PORT}</code>`, {
+      parse_mode: 'HTML',
       reply_markup: mainMenuKeyboard(),
     });
   });
@@ -158,7 +164,11 @@ export function registerPanel(bot: import('grammy').Bot<BotContext>, manager: Se
     if (!ensureAdmin(ctx)) return ctx.answerCallbackQuery({ text: 'Нет доступа' });
     clearAwait(ctx);
     await ctx.answerCallbackQuery();
-    await editOrReply(ctx, 'Панель управления ботами', mainMenuKeyboard());
+    await editOrReply(
+      ctx,
+      `FunTime панель (только пиратка)\n<code>${MC_HOST}:${MC_PORT}</code>`,
+      mainMenuKeyboard(),
+    );
   });
 
   bot.callbackQuery('bots:list', async (ctx) => {
@@ -175,11 +185,11 @@ export function registerPanel(bot: import('grammy').Bot<BotContext>, manager: Se
   bot.callbackQuery('bots:add', async (ctx) => {
     if (!ensureAdmin(ctx)) return ctx.answerCallbackQuery({ text: 'Нет доступа' });
     clearAwait(ctx);
-    ctx.session.awaitKind = 'add_email';
+    ctx.session.awaitKind = 'add_nick';
     await ctx.answerCallbackQuery();
     await editOrReply(
       ctx,
-      'Введи Microsoft email аккаунта (лицензия).\n/cancel — отмена',
+      'Введи ник пиратки (3–16: латиница, цифры, _).\nБез лицензии Microsoft.\n/cancel — отмена',
       new InlineKeyboard().text('« Отмена', 'bots:list'),
     );
   });
@@ -214,7 +224,7 @@ export function registerPanel(bot: import('grammy').Bot<BotContext>, manager: Se
       ok: 'Включаю...',
       already: 'Уже онлайн/подключается',
       missing: 'Бот не найден',
-      no_email: 'Сначала задай email',
+      no_nick: 'Сначала задай ник',
     } as const;
     await ctx.answerCallbackQuery({ text: map[result] });
     const record = db.getBot(id);
@@ -252,23 +262,30 @@ export function registerPanel(bot: import('grammy').Bot<BotContext>, manager: Se
     );
   });
 
-  bot.callbackQuery(/^bot:(\d+):nearby$/, async (ctx) => {
+  bot.callbackQuery(/^bot:(\d+):dm$/, async (ctx) => {
     if (!ensureAdmin(ctx)) return ctx.answerCallbackQuery({ text: 'Нет доступа' });
     const id = Number(ctx.match![1]);
-    const result = manager.getNearbyPlayers(id);
-    if (result.offline) {
+    if (manager.getStatus(id) !== 'online') {
       await ctx.answerCallbackQuery({ text: 'Бот оффлайн' });
       return;
     }
-    await ctx.answerCallbackQuery({ text: `Найдено: ${result.count}` });
-    await editOrReply(
-      ctx,
-      result.text,
-      new InlineKeyboard()
-        .text('Обновить список', `bot:${id}:nearby`)
-        .row()
-        .text('« Назад', `bot:${id}`),
-    );
+    await ctx.answerCallbackQuery({ text: '/an305 → /dm...' });
+    void ctx.reply(`⚔ [#${id}] <code>/an305</code> → <code>/dm</code>...`, { parse_mode: 'HTML' });
+    const result = await manager.runDm(id);
+    const map = {
+      ok: 'Смотри дамп окна в чате',
+      offline: 'Бот оффлайн',
+      timeout: 'Окно не открылось',
+      fail: 'Ошибка',
+    } as const;
+    const record = db.getBot(id);
+    if (record) {
+      await editOrReply(
+        ctx,
+        `${botCardText(record, manager)}\n\n/dm: <b>${map[result]}</b>`,
+        botActionsKeyboard(record, manager),
+      );
+    }
   });
 
   bot.callbackQuery(/^bot:(\d+):clicker$/, async (ctx) => {
@@ -364,18 +381,18 @@ export function registerPanel(bot: import('grammy').Bot<BotContext>, manager: Se
     await editOrReply(ctx, `Настройки #${id}\n${botCardText(record, manager)}`, settingsKeyboard(record));
   });
 
-  bot.callbackQuery(/^bot:(\d+):set:(email|password|proxy)$/, async (ctx) => {
+  bot.callbackQuery(/^bot:(\d+):set:(nick|password|proxy)$/, async (ctx) => {
     if (!ensureAdmin(ctx)) return ctx.answerCallbackQuery({ text: 'Нет доступа' });
     const id = Number(ctx.match![1]);
-    const field = ctx.match![2] as 'email' | 'password' | 'proxy';
+    const field = ctx.match![2] as 'nick' | 'password' | 'proxy';
     clearAwait(ctx);
     ctx.session.awaitBotId = id;
     ctx.session.awaitKind =
-      field === 'email' ? 'set_email' : field === 'password' ? 'set_password' : 'set_proxy';
+      field === 'nick' ? 'set_nick' : field === 'password' ? 'set_password' : 'set_proxy';
 
     const hints = {
-      email: 'Введи Microsoft email',
-      password: 'Введи Microsoft password (или "-" чтобы очистить)',
+      nick: 'Введи ник пиратки (3–16: A-Z a-z 0-9 _)',
+      password: 'Введи пароль FunTime для /login (или "-" чтобы очистить)',
       proxy: 'Введи прокси:\n<code>host:port:user:pass</code>\nили <code>user:pass@host:port</code>\n"-" — убрать прокси',
     } as const;
 
@@ -434,15 +451,15 @@ export function registerPanel(bot: import('grammy').Bot<BotContext>, manager: Se
       return;
     }
 
-    if (kind === 'add_email') {
-      if (!text.includes('@')) {
-        await ctx.reply('Нужен email. Попробуй ещё раз или /cancel');
+    if (kind === 'add_nick') {
+      if (!isValidNick(text)) {
+        await ctx.reply('Ник: 3–16 символов, только латиница/цифры/_. Ещё раз или /cancel');
         return;
       }
-      ctx.session.draftEmail = text;
+      ctx.session.draftNick = text;
       ctx.session.awaitKind = 'add_password';
       await ctx.reply(
-        'Введи Microsoft password.\nОтправь "-" если хочешь войти через device code.',
+        'Введи пароль аккаунта FunTime (для /login и /reg).',
         { reply_markup: new InlineKeyboard().text('« Отмена', 'bots:list') },
       );
       return;
@@ -462,7 +479,7 @@ export function registerPanel(bot: import('grammy').Bot<BotContext>, manager: Se
     }
 
     if (kind === 'add_proxy') {
-      const email = ctx.session.draftEmail!;
+      const nick = ctx.session.draftNick!;
       const password = ctx.session.draftPassword ?? '';
       let proxy = null;
       if (text !== '-') {
@@ -472,9 +489,9 @@ export function registerPanel(bot: import('grammy').Bot<BotContext>, manager: Se
           return;
         }
       }
-      const created = db.addBot({ email, password, proxy });
+      const created = db.addBot({ email: nick, password, proxy, label: nick });
       clearAwait(ctx);
-      await ctx.reply(`Бот #${created.id} добавлен.`, {
+      await ctx.reply(`Бот #${created.id} (${nick}) добавлен — FunTime пиратка.`, {
         reply_markup: botsListKeyboard(manager),
       });
       return;
@@ -520,16 +537,16 @@ export function registerPanel(bot: import('grammy').Bot<BotContext>, manager: Se
       return;
     }
 
-    if (kind === 'set_email') {
-      if (!text.includes('@')) {
-        await ctx.reply('Нужен email');
+    if (kind === 'set_nick') {
+      if (!isValidNick(text)) {
+        await ctx.reply('Ник: 3–16, латиница/цифры/_');
         return;
       }
       manager.invalidate(botId);
-      db.updateBot(botId, { email: text, label: text.split('@')[0] || text });
+      db.updateBot(botId, { email: text, label: text });
       clearAwait(ctx);
       const record = db.getBot(botId)!;
-      await ctx.reply('Email обновлён (перезапусти бота).', {
+      await ctx.reply('Ник обновлён (перезапусти бота).', {
         reply_markup: settingsKeyboard(record),
       });
       return;
