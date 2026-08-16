@@ -146,6 +146,8 @@ export class BotSession extends EventEmitter {
   private autoDmDone = false;
   /** AuthMe /login прошёл. */
   private serverAuthOk = false;
+  /** Бот в хабе (можно /an*). */
+  private hubReady = false;
 
   constructor(opts: BotSessionOptions) {
     super();
@@ -198,6 +200,7 @@ export class BotSession extends EventEmitter {
     this.disconnectNotified = false;
     this.inGameName = null;
     this.serverAuthOk = false;
+    this.hubReady = false;
 
     const timeoutMin = Math.round(AUTH_TIMEOUT_MS / 60_000);
     void this.notify(
@@ -295,7 +298,16 @@ export class BotSession extends EventEmitter {
           logger.info(`[bot #${this.id}] captcha answer: ${ans}`);
           this.bot.chat(ans);
           void this.notify(`✅ [#${this.id}] Капча: <code>${escapeHtml(ans)}</code>`);
+          // После капчи хаб может уже быть — ждём links, иначе fallback через 12с
           this.tryScheduleAn305();
+          setTimeout(() => {
+            if (this.autoDmDone || this.stopped) return;
+            if (!this.hubReady) {
+              this.hubReady = true;
+              logger.info(`[bot #${this.id}] hub ready fallback after captcha`);
+              this.tryScheduleAn305();
+            }
+          }, 12_000);
         } catch (error) {
           logger.error(`[bot #${this.id}] captcha solve error`, error);
           void this.notify(`❌ [#${this.id}] Ошибка решения капчи`);
@@ -486,7 +498,7 @@ export class BotSession extends EventEmitter {
     });
   }
 
-  /** Капча+логин готовы → /an305 → spawn → /dm. */
+  /** Хаб+капча готовы → /an305 → spawn → /dm. */
   private tryScheduleAn305() {
     if (this.autoDmDone || this.stopped) return;
     if (!this.isSpawned || !this.isActive) return;
@@ -494,14 +506,17 @@ export class BotSession extends EventEmitter {
       logger.info(`[bot #${this.id}] wait captcha before /an305`);
       return;
     }
+    if (!this.hubReady) {
+      logger.info(`[bot #${this.id}] wait hub before /an305`);
+      return;
+    }
 
     this.autoDmDone = true;
-    const delay = this.serverAuthOk ? 3_000 : 7_000;
-    logger.info(`[bot #${this.id}] schedule /an305 in ${delay}ms (authOk=${this.serverAuthOk})`);
+    logger.info(`[bot #${this.id}] schedule /an305 in 2s (hub ready)`);
     setTimeout(() => {
       if (this.stopped || !this.isActive || !this.isSpawned) return;
       void this.runAn305ThenDm();
-    }, delay);
+    }, 2_000);
   }
 
   /** Заход на режим /an305, ждём телепорт, затем /dm + дамп окна. */
@@ -522,20 +537,46 @@ export class BotSession extends EventEmitter {
       return;
     }
 
-    const gotSpawn = await this.waitNextSpawn(15_000);
+    const chatBuf: string[] = [];
+    const onChat = (msg: string) => {
+      const line = String(msg ?? '').trim();
+      if (!line) return;
+      chatBuf.push(line);
+      logger.info(`[bot #${this.id}] chat: ${line.slice(0, 160)}`);
+    };
+    bot.on('messagestr', onChat);
+
+    const gotSpawn = await this.waitNextSpawn(20_000);
     logger.info(`[bot #${this.id}] after /an305 spawn=${gotSpawn}`);
-    await sleep(gotSpawn ? 2_500 : 5_000);
-    if (this.stopped || !this.isActive) return;
+
+    if (!gotSpawn) {
+      bot.off('messagestr', onChat);
+      const hint = chatBuf.slice(-5).map(escapeHtml).join('\n') || 'нет ответа сервера';
+      void this.notify(
+        `❌ [#${this.id}] Не зашёл на /an305 (нет spawn).\n`
+        + `Чат:\n<code>${hint.slice(0, 800)}</code>`,
+      );
+      return;
+    }
+
+    await sleep(2_500);
+    if (this.stopped || !this.isActive) {
+      bot.off('messagestr', onChat);
+      return;
+    }
 
     void this.notify(`📨 [#${this.id}] На /an305 — пишу <code>/dm</code>...`);
     const result = await this.runDm();
+    bot.off('messagestr', onChat);
+
     if (result.ok) {
       void this.notify(result.text);
       return;
     }
+    const hint = chatBuf.slice(-8).map(escapeHtml).join('\n') || '—';
     if (result.reason === 'timeout') {
       void this.notify(
-        `⏰ [#${this.id}] /dm после /an305: окно не открылось за 15с`,
+        `⏰ [#${this.id}] /dm: окно не открылось.\nЧат:\n<code>${hint.slice(0, 800)}</code>`,
       );
       return;
     }
@@ -727,13 +768,27 @@ export class BotSession extends EventEmitter {
         low.includes('успешно')
         || low.includes('авторизован')
         || low.includes('добро пожаловать')
-        || low.includes('успешн')
       ) {
         if (!this.serverAuthOk) {
           this.serverAuthOk = true;
           logger.info(`[bot #${this.id}] server auth ok: ${textMsg.slice(0, 80)}`);
-          this.tryScheduleAn305();
         }
+      }
+
+      // Хаб FunTime: можно писать /an*
+      if (
+        !this.hubReady
+        && (
+          /социальн/i.test(textMsg)
+          || /\/links/i.test(textMsg)
+          || /выберите режим/i.test(textMsg)
+          || /компас/i.test(textMsg)
+          || /анархи/i.test(textMsg)
+        )
+      ) {
+        this.hubReady = true;
+        logger.info(`[bot #${this.id}] hub ready: ${textMsg.slice(0, 100)}`);
+        this.tryScheduleAn305();
       }
     });
 
