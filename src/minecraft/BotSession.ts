@@ -706,7 +706,7 @@ export class BotSession extends EventEmitter {
     bot.off('messagestr', onChat);
 
     if (result.ok) {
-      void this.notify(result.text);
+      if (result.text.trim()) void this.notify(result.text);
       this.startDmRefresh();
       return;
     }
@@ -725,13 +725,10 @@ export class BotSession extends EventEmitter {
   /** Каждые 20с: кнопка «Обновить» если окно живо, иначе тихий reopen /dm. */
   private startDmRefresh() {
     this.stopDmRefresh();
-    logger.info(`[bot #${this.id}] /dm refresh via button every 20s (first at 8s)`);
-    void this.notify(`🔁 [#${this.id}] Обновляю /dm кнопкой «Обновить» каждые 20с`);
-    // FunTime idle-closes GUI раньше 20с — первый клик по кнопке раньше
-    this.dmEarlyRefreshTimer = setTimeout(() => {
-      this.dmEarlyRefreshTimer = null;
-      void this.refreshDmOrders();
-    }, 8_000);
+    logger.info(`[bot #${this.id}] /dm refresh every 20s, alert ratio >800k`);
+    void this.notify(
+      `🔁 [#${this.id}] /dm каждые 20с · оповещения только при курсе &gt; <code>800,000</code>`,
+    );
     this.dmRefreshTimer = setInterval(() => {
       void this.refreshDmOrders();
     }, 20_000);
@@ -756,7 +753,11 @@ export class BotSession extends EventEmitter {
       logger.info(`[bot #${this.id}] /dm refresh tick (button)`);
       const result = await this.refreshDmViaButton();
       if (result.ok) {
-        void this.notify(result.text);
+        if (result.text.trim()) {
+          void this.notify(result.text);
+        } else {
+          logger.info(`[bot #${this.id}] /dm refresh: no lots with ratio >800k`);
+        }
       } else {
         logger.warn(`[bot #${this.id}] /dm refresh failed: ${result.reason} ${result.error ?? ''}`);
       }
@@ -771,7 +772,8 @@ export class BotSession extends EventEmitter {
     void this.notify(`📨 [#${this.id}] Пишу <code>/dm</code>...`);
     const result = await this.runDm();
     if (result.ok) {
-      void this.notify(result.text);
+      if (result.text.trim()) void this.notify(result.text);
+      else void this.notify(`✅ [#${this.id}] /dm открыт · лотов с курсом &gt;800к нет`);
       this.startDmRefresh();
       return;
     }

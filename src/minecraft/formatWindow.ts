@@ -83,6 +83,23 @@ export type PriceRatio = {
   lore: string[];
 };
 
+/** Минимальный курс ($ за 1⚡) для TG-оповещения. */
+export const DM_MIN_RATIO_ALERT = 800_000;
+
+/** «$825,000 за 1⚡» → 825000 */
+export function parseRatioAmount(ratio: string | null | undefined): number | null {
+  if (!ratio) return null;
+  const m = ratio.replace(/\s/g, '').match(/(\d[\d.,]*)/);
+  if (!m) return null;
+  const n = Number(m[1].replace(/,/g, ''));
+  return Number.isFinite(n) ? n : null;
+}
+
+export function isHighRatioLot(ratio: string | null | undefined, min = DM_MIN_RATIO_ALERT): boolean {
+  const n = parseRatioAmount(ratio);
+  return n != null && n > min;
+}
+
 /** FunTime /dm lore: «Цена: 1000⚡», «Курс: $800,000 за 1⚡», «Монет: $800,000,000». */
 export function extractPriceAndRatio(lore: string[]): PriceRatio {
   let price: string | null = null;
@@ -223,7 +240,7 @@ export function listWindowItemNames(window: Window): string {
   return lines.slice(0, 30).join('\n') || '(пусто)';
 }
 
-/** Дамп заказов /dm: название + цена + соотношение (курс). */
+/** Дамп заказов /dm с курсом > 800к: название + цена + соотношение. */
 export function formatDmOrdersDump(window: Window, botId: number): string[] {
   const title = stripMinecraftText((window as any).title) || 'ДонМаркет';
   const slots = window.slots ?? [];
@@ -237,6 +254,7 @@ export function formatDmOrdersDump(window: Window, botId: number): string[] {
     lore: string[];
     price: string | null;
     ratio: string | null;
+    ratioNum: number | null;
     coins: string | null;
   }> = [];
   const lines: string[] = [];
@@ -248,6 +266,7 @@ export function formatDmOrdersDump(window: Window, botId: number): string[] {
     const lore = itemLore(item);
     const parsed = extractPriceAndRatio(lore);
     const name = itemTitle(item);
+    const ratioNum = parseRatioAmount(parsed.ratio);
     debug.push({
       slot: i,
       name: item.name,
@@ -255,17 +274,18 @@ export function formatDmOrdersDump(window: Window, botId: number): string[] {
       lore,
       price: parsed.price,
       ratio: parsed.ratio,
+      ratioNum,
       coins: parsed.coins,
     });
 
-    // лот = есть цена (⚡) или курс
-    if (!parsed.price && !parsed.ratio) continue;
+    // лот = есть курс выше порога
+    if (!parsed.ratio || !isHighRatioLot(parsed.ratio)) continue;
     if (lines.length >= 10) continue;
 
     lines.push(
       `<b>${escapeHtml(name)}</b>`
       + `\n💰 Цена: <code>${escapeHtml(parsed.price ?? '—')}</code>`
-      + `\n📉 Соотношение: <code>${escapeHtml(parsed.ratio ?? '—')}</code>`
+      + `\n📉 Соотношение: <code>${escapeHtml(parsed.ratio)}</code>`
       + (parsed.coins ? `\n🪙 Монет: <code>${escapeHtml(parsed.coins)}</code>` : ''),
     );
   }
@@ -281,6 +301,8 @@ export function formatDmOrdersDump(window: Window, botId: number): string[] {
           inventoryStart: end,
           refreshSlot,
           slotsTotal: slots.length,
+          minRatioAlert: DM_MIN_RATIO_ALERT,
+          matched: lines.length,
           items: debug,
         },
         null,
@@ -291,29 +313,22 @@ export function formatDmOrdersDump(window: Window, botId: number): string[] {
     // ignore
   }
 
+  // нет лотов выше порога — без TG-сообщения
+  if (lines.length === 0) return [];
+
   const header = [
-    `🗂 [#${botId}] /dm → топ-10 заказов`,
+    `🚨 [#${botId}] /dm · курс &gt; ${DM_MIN_RATIO_ALERT.toLocaleString('en-US')}`,
     `Окно: <b>${escapeHtml(title)}</b>`,
-    `Показано: <code>${lines.length}</code> · кнопка обновления каждые 20с`
-      + (refreshSlot != null ? ` (слот <code>${refreshSlot}</code>)` : ' (кнопка пока не найдена)'),
+    `Лотов: <code>${lines.length}</code>`,
     '',
   ].join('\n');
-
-  if (lines.length === 0) {
-    const sample = debug.slice(0, 3).map((d) =>
-      `#${d.slot} ${d.title}\nlore: ${d.lore.slice(0, 6).join(' | ')}`,
-    ).join('\n');
-    return [
-      `${header}Лоты не распарсились.\n<code>${escapeHtml(sample.slice(0, 1500))}</code>`,
-    ];
-  }
 
   const chunks: string[] = [];
   let current = header;
   for (const block of lines) {
     if (current.length + block.length + 2 > TG_SAFE) {
       chunks.push(current.trimEnd());
-      current = `🗂 [#${botId}] заказы (продолжение)\n\n${block}\n\n`;
+      current = `🚨 [#${botId}] лоты &gt;800к (продолжение)\n\n${block}\n\n`;
     } else {
       current += `${block}\n\n`;
     }
