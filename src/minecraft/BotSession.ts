@@ -151,8 +151,6 @@ export class BotSession extends EventEmitter {
   /** Таймер обновления /dm заказов. */
   private dmRefreshTimer: ReturnType<typeof setInterval> | null = null;
   private dmRefreshInFlight = false;
-  /** Последняя TG-отправка топ-10 (кнопку жмём чаще, чтобы GUI не закрыли). */
-  private lastDmTgAt = 0;
 
   constructor(opts: BotSessionOptions) {
     super();
@@ -476,19 +474,6 @@ export class BotSession extends EventEmitter {
         withLore: true,
       }).join('\n\n---\n\n');
 
-      // Сразу жмём «Обновить», только если окно реально живое у mineflayer.
-      if (refreshSlot != null && bot.currentWindow) {
-        try {
-          await bot.clickWindow(refreshSlot, 0, 0);
-          await sleep(800);
-          logger.info(
-            `[bot #${this.id}] initial refresh click #${refreshSlot}, window=${Boolean(bot.currentWindow)}`,
-          );
-        } catch (e) {
-          logger.warn(`[bot #${this.id}] initial refresh click failed: ${String(e)}`);
-        }
-      }
-
       return { ok: true, text };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
@@ -511,18 +496,14 @@ export class BotSession extends EventEmitter {
     let win = bot.currentWindow;
     if (!win) {
       logger.info(`[bot #${this.id}] no window — full /dm reopen`);
-      return this.runDm();
+      return this.runDm(15_000, { quiet: true });
     }
 
     const refreshSlot = findDmRefreshSlot(win);
     if (refreshSlot == null) {
       const listed = listWindowItemNames(win);
       logger.warn(`[bot #${this.id}] refresh button missing — slots:\n${listed}`);
-      void this.notify(
-        `⚠️ [#${this.id}] Кнопка обновления не найдена, переоткрываю /dm.\n`
-        + `<code>${escapeHtml(listed.slice(0, 1200))}</code>`,
-      );
-      return this.runDm();
+      return this.runDm(15_000, { quiet: true });
     }
 
     try {
@@ -536,7 +517,7 @@ export class BotSession extends EventEmitter {
           win = await this.waitForWindow(8_000, () => {}, { ignoreCurrent: false });
         } catch {
           logger.warn(`[bot #${this.id}] window gone after refresh — full /dm reopen`);
-          return this.runDm();
+          return this.runDm(15_000, { quiet: true });
         }
       } else if ((bot.currentWindow as any)?.id !== prevId) {
         await sleep(400);
@@ -735,15 +716,14 @@ export class BotSession extends EventEmitter {
     );
   }
 
-  /** Жмём кнопку обновления часто (keep-alive), в TG шлём топ-10 раз в 20с. */
+  /** Каждые 20с: кнопка «Обновить» если окно живо, иначе тихий reopen /dm. */
   private startDmRefresh() {
     this.stopDmRefresh();
-    this.lastDmTgAt = Date.now();
-    logger.info(`[bot #${this.id}] /dm refresh button keep-alive 5s, TG every 20s`);
-    void this.notify(`🔁 [#${this.id}] Кнопка «Обновить» в /dm · топ-10 в TG каждые 20с`);
+    logger.info(`[bot #${this.id}] /dm refresh via button every 20s`);
+    void this.notify(`🔁 [#${this.id}] Обновляю /dm кнопкой «Обновить» каждые 20с`);
     this.dmRefreshTimer = setInterval(() => {
       void this.refreshDmOrders();
-    }, 5_000);
+    }, 20_000);
   }
 
   private stopDmRefresh() {
@@ -761,13 +741,7 @@ export class BotSession extends EventEmitter {
       logger.info(`[bot #${this.id}] /dm refresh tick (button)`);
       const result = await this.refreshDmViaButton();
       if (result.ok) {
-        const now = Date.now();
-        if (now - this.lastDmTgAt >= 20_000) {
-          this.lastDmTgAt = now;
-          void this.notify(result.text);
-        } else {
-          logger.info(`[bot #${this.id}] refresh ok (keep-alive, skip TG)`);
-        }
+        void this.notify(result.text);
       } else {
         logger.warn(`[bot #${this.id}] /dm refresh failed: ${result.reason} ${result.error ?? ''}`);
       }
