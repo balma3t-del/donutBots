@@ -150,6 +150,7 @@ export class BotSession extends EventEmitter {
   private hubReady = false;
   /** Таймер обновления /dm заказов. */
   private dmRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  private dmEarlyRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private dmRefreshInFlight = false;
 
   constructor(opts: BotSessionOptions) {
@@ -509,21 +510,26 @@ export class BotSession extends EventEmitter {
     try {
       const prevId = (win as any)?.id;
       logger.info(`[bot #${this.id}] click refresh slot #${refreshSlot}`);
-      await bot.clickWindow(refreshSlot, 0, 0);
-      // FunTime может обновить слоты на месте или прислать close+open
-      await sleep(800);
-      if (!bot.currentWindow) {
-        try {
-          win = await this.waitForWindow(8_000, () => {}, { ignoreCurrent: false });
-        } catch {
-          logger.warn(`[bot #${this.id}] window gone after refresh — full /dm reopen`);
-          return this.runDm(15_000, { quiet: true });
-        }
-      } else if ((bot.currentWindow as any)?.id !== prevId) {
-        await sleep(400);
-        win = bot.currentWindow;
-      } else {
-        win = bot.currentWindow;
+      // FunTime на «Обновить» часто шлёт close_window + open_window
+      const updated = await this.waitForWindow(
+        10_000,
+        async () => {
+          await bot.clickWindow(refreshSlot, 0, 0);
+        },
+        { ignoreCurrent: true },
+      ).catch(async () => {
+        await sleep(1_200);
+        return bot.currentWindow;
+      });
+
+      win = updated ?? bot.currentWindow;
+      if (!win) {
+        logger.warn(`[bot #${this.id}] window gone after refresh — full /dm reopen`);
+        return this.runDm(15_000, { quiet: true });
+      }
+      if ((win as any)?.id === prevId) {
+        await sleep(600);
+        win = bot.currentWindow ?? win;
       }
       const text = formatWindowDumpChunks(win, this.id, {
         header: `🗂 [#${this.id}] /dm обновлено кнопкой`,
@@ -719,8 +725,13 @@ export class BotSession extends EventEmitter {
   /** Каждые 20с: кнопка «Обновить» если окно живо, иначе тихий reopen /dm. */
   private startDmRefresh() {
     this.stopDmRefresh();
-    logger.info(`[bot #${this.id}] /dm refresh via button every 20s`);
+    logger.info(`[bot #${this.id}] /dm refresh via button every 20s (first at 8s)`);
     void this.notify(`🔁 [#${this.id}] Обновляю /dm кнопкой «Обновить» каждые 20с`);
+    // FunTime idle-closes GUI раньше 20с — первый клик по кнопке раньше
+    this.dmEarlyRefreshTimer = setTimeout(() => {
+      this.dmEarlyRefreshTimer = null;
+      void this.refreshDmOrders();
+    }, 8_000);
     this.dmRefreshTimer = setInterval(() => {
       void this.refreshDmOrders();
     }, 20_000);
@@ -730,6 +741,10 @@ export class BotSession extends EventEmitter {
     if (this.dmRefreshTimer) {
       clearInterval(this.dmRefreshTimer);
       this.dmRefreshTimer = null;
+    }
+    if (this.dmEarlyRefreshTimer) {
+      clearTimeout(this.dmEarlyRefreshTimer);
+      this.dmEarlyRefreshTimer = null;
     }
     this.dmRefreshInFlight = false;
   }
