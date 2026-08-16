@@ -37,7 +37,7 @@ export function formatWindowDump(window: Window, botId: number): string {
   const slots = window.slots ?? [];
 
   const lines: string[] = [
-    `🗂 [#${botId}] Окно после <code>/dm</code>`,
+    `🗂 [#${botId}] Окно после <code>/an305</code> → <code>/dm</code>`,
     `Заголовок: <b>${escapeHtml(title)}</b>`,
     `Тип/id: <code>${escapeHtml(type)}</code>`,
     `Слотов: <code>${slots.length}</code>`,

@@ -89,19 +89,8 @@ export class SessionManager {
   async runDm(botId: number): Promise<'ok' | 'offline' | 'timeout' | 'fail'> {
     const session = this.sessions.get(botId);
     if (!session?.isActive) return 'offline';
-    const result = await session.runDm();
-    if (result.ok) {
-      await this.notify(result.text);
-      return 'ok';
-    }
-    if (result.reason === 'timeout') {
-      await this.notify(
-        `⏰ [#${botId}] /dm: окно не открылось за 12с`,
-      );
-      return 'timeout';
-    }
-    await this.notify(`❌ [#${botId}] /dm не удалось`);
-    return result.reason;
+    await session.runAn305ThenDm();
+    return session.isActive ? 'ok' : 'offline';
   }
 
   getNearbyPlayers(botId: number): { offline: true } | { offline: false; text: string; count: number } {

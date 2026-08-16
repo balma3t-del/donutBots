@@ -75,7 +75,7 @@ function botActionsKeyboard(bot: BotRecord, manager: SessionManager): InlineKeyb
     .row();
 
   if (status === 'online') {
-    kb.text('/dm + окно', `bot:${bot.id}:dm`).row();
+    kb.text('/an305 → /dm', `bot:${bot.id}:dm`).row();
     const clickerOn = manager.isClickerOn(bot.id);
     kb.text(clickerOn ? 'Выкл кликер ПКМ' : 'Вкл кликер ПКМ', `bot:${bot.id}:clicker`)
       .row();
@@ -289,11 +289,11 @@ export function registerPanel(bot: import('grammy').Bot<BotContext>, manager: Se
       await ctx.answerCallbackQuery({ text: 'Бот оффлайн' });
       return;
     }
-    await ctx.answerCallbackQuery({ text: 'Пишу /dm...' });
-    void ctx.reply(`📨 [#${id}] Пишу <code>/dm</code>, жду окно...`, { parse_mode: 'HTML' });
+    await ctx.answerCallbackQuery({ text: '/an305 → /dm...' });
+    void ctx.reply(`⚔ [#${id}] <code>/an305</code> → <code>/dm</code>...`, { parse_mode: 'HTML' });
     const result = await manager.runDm(id);
     const map = {
-      ok: 'Окно пришло в чат',
+      ok: 'Смотри дамп окна в чате',
       offline: 'Бот оффлайн',
       timeout: 'Окно не открылось',
       fail: 'Ошибка',

@@ -458,6 +458,45 @@ export class BotSession extends EventEmitter {
     }
   }
 
+  /** Заход на режим /an305, пауза, затем /dm + дамп окна. */
+  async runAn305ThenDm() {
+    const bot = this.bot;
+    if (!bot || !this.isActive || !this.isSpawned) {
+      void this.notify(`❌ [#${this.id}] /an305: бот оффлайн`);
+      return;
+    }
+
+    void this.notify(`⚔ [#${this.id}] Пишу <code>/an305</code>...`);
+    try {
+      bot.chat('/an305');
+      logger.info(`[bot #${this.id}] chat /an305`);
+    } catch (error) {
+      logger.error(`[bot #${this.id}] /an305 failed`, error);
+      void this.notify(`❌ [#${this.id}] Не удалось отправить /an305`);
+      return;
+    }
+
+    // Ждём телепорт/загрузку режима
+    await sleep(8_000);
+    if (this.stopped || !this.isActive) return;
+
+    void this.notify(`📨 [#${this.id}] На /an305 — пишу <code>/dm</code>...`);
+    const result = await this.runDm();
+    if (result.ok) {
+      void this.notify(result.text);
+      return;
+    }
+    if (result.reason === 'timeout') {
+      void this.notify(
+        `⏰ [#${this.id}] /dm после /an305: окно не открылось за 12с`,
+      );
+      return;
+    }
+    void this.notify(
+      `❌ [#${this.id}] /dm ошибка: <code>${escapeHtml(result.error ?? result.reason)}</code>`,
+    );
+  }
+
   async runDmAndNotify() {
     void this.notify(`📨 [#${this.id}] Пишу <code>/dm</code>...`);
     const result = await this.runDm();
@@ -709,13 +748,13 @@ export class BotSession extends EventEmitter {
         void this.smoothSpin360();
       }, 800 + Math.floor(Math.random() * 700));
 
-      // После входа: /dm и дамп окна в TG (один раз за сессию)
+      // После входа: /an305 → /dm + дамп окна (один раз за сессию)
       if (!this.autoDmDone) {
         this.autoDmDone = true;
         setTimeout(() => {
           if (this.stopped || !this.isActive || !this.isSpawned) return;
-          void this.runDmAndNotify();
-        }, 5_000);
+          void this.runAn305ThenDm();
+        }, 6_000);
       }
     });
 
