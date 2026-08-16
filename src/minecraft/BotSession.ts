@@ -20,6 +20,7 @@ import type { ProxyConfig } from '../handlers/types.js';
 import { captchaEnabled, solveFuntimeCaptcha } from '../utils/captchaSolver.js';
 import { checkProxyWorking, hasProxy } from '../utils/proxy.js';
 import { logger } from '../utils/logger.js';
+import { formatWindowDump } from './formatWindow.js';
 import { attachFuntimeAuth } from './funtimeAuth.js';
 
 const require = createRequire(import.meta.url);
@@ -154,6 +155,8 @@ export class BotSession extends EventEmitter {
   private captchaSolving = false;
   private captchaSolved = false;
   private captchaHandler: InstanceType<typeof FlayerCaptcha> | null = null;
+  /** Уже делали авто /dm после входа. */
+  private autoDmDone = false;
 
   constructor(opts: BotSessionOptions) {
     super();
@@ -200,6 +203,7 @@ export class BotSession extends EventEmitter {
     this.isClickerOn = false;
     this.captchaSolving = false;
     this.captchaSolved = false;
+    this.autoDmDone = false;
     this.stopClickerTimer();
     this.lastDisconnectReason = null;
     this.disconnectNotified = false;
@@ -391,6 +395,90 @@ export class BotSession extends EventEmitter {
       logger.error(`[bot #${this.id}] chat failed`, error);
       return false;
     }
+  }
+
+  /**
+   * Пишет /dm, ждёт открытия GUI и возвращает текстовый дамп слотов.
+   */
+  async runDm(timeoutMs = 12_000): Promise<
+    { ok: true; text: string } | { ok: false; reason: 'offline' | 'timeout' | 'fail'; error?: string }
+  > {
+    const bot = this.bot;
+    if (!bot || !this.isActive) return { ok: false, reason: 'offline' };
+
+    try {
+      if (bot.currentWindow) {
+        try {
+          bot.closeWindow(bot.currentWindow);
+        } catch {
+          // ignore
+        }
+        await sleep(300);
+      }
+
+      const dump = await new Promise<string>((resolve, reject) => {
+        let settled = false;
+        const timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(new Error('timeout'));
+        }, timeoutMs);
+
+        const finish = async (window: import('prismarine-windows').Window) => {
+          if (settled) return;
+          // FunTime иногда шлёт слоты чуть позже open
+          await sleep(600);
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve(formatWindowDump(window, this.id));
+        };
+
+        const onOpen = (window: import('prismarine-windows').Window) => {
+          void finish(window);
+        };
+
+        const cleanup = () => {
+          clearTimeout(timer);
+          bot.removeListener('windowOpen', onOpen);
+        };
+
+        bot.once('windowOpen', onOpen);
+        logger.info(`[bot #${this.id}] chat /dm`);
+        bot.chat('/dm');
+      });
+
+      return { ok: true, text: dump };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg === 'timeout') return { ok: false, reason: 'timeout' };
+      logger.error(`[bot #${this.id}] runDm failed`, error);
+      return { ok: false, reason: 'fail', error: msg };
+    }
+  }
+
+  async runDmAndNotify() {
+    void this.notify(`📨 [#${this.id}] Пишу <code>/dm</code>...`);
+    const result = await this.runDm();
+    if (result.ok) {
+      void this.notify(result.text);
+      return;
+    }
+    if (result.reason === 'offline') {
+      void this.notify(`❌ [#${this.id}] /dm: бот оффлайн`);
+      return;
+    }
+    if (result.reason === 'timeout') {
+      void this.notify(
+        `⏰ [#${this.id}] /dm: окно не открылось за 12с.\n`
+        + `Возможно ещё хаб/капча/логин — попробуй кнопку «/dm» позже.`,
+      );
+      return;
+    }
+    void this.notify(
+      `❌ [#${this.id}] /dm ошибка: <code>${escapeHtml(result.error ?? 'fail')}</code>`,
+    );
   }
 
   startClicker(): 'ok' | 'offline' | 'already' | 'fail' {
@@ -620,6 +708,15 @@ export class BotSession extends EventEmitter {
       setTimeout(() => {
         void this.smoothSpin360();
       }, 800 + Math.floor(Math.random() * 700));
+
+      // После входа: /dm и дамп окна в TG (один раз за сессию)
+      if (!this.autoDmDone) {
+        this.autoDmDone = true;
+        setTimeout(() => {
+          if (this.stopped || !this.isActive || !this.isSpawned) return;
+          void this.runDmAndNotify();
+        }, 5_000);
+      }
     });
 
     bot.on('entitySpawn', (entity) => {

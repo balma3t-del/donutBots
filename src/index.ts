@@ -54,7 +54,17 @@ async function main() {
   await bot.api.deleteWebhook({ drop_pending_updates: true }).catch(() => {});
 
   await bot.start({
-    onStart: (info) => logger.info(`TG bot @${info.username} started`),
+    onStart: async (info) => {
+      logger.info(`TG bot @${info.username} started`);
+      if (process.env.AUTO_TURN_ON === '1') {
+        const bots = db.listBots();
+        logger.info(`AUTO_TURN_ON: starting ${bots.length} bot(s)`);
+        for (const record of bots) {
+          const result = await manager.turnOn(record.id);
+          logger.info(`AUTO_TURN_ON #${record.id} → ${result}`);
+        }
+      }
+    },
   });
 }
 

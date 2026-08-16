@@ -86,6 +86,24 @@ export class SessionManager {
     return session.chat(message) ? 'ok' : 'fail';
   }
 
+  async runDm(botId: number): Promise<'ok' | 'offline' | 'timeout' | 'fail'> {
+    const session = this.sessions.get(botId);
+    if (!session?.isActive) return 'offline';
+    const result = await session.runDm();
+    if (result.ok) {
+      await this.notify(result.text);
+      return 'ok';
+    }
+    if (result.reason === 'timeout') {
+      await this.notify(
+        `⏰ [#${botId}] /dm: окно не открылось за 12с`,
+      );
+      return 'timeout';
+    }
+    await this.notify(`❌ [#${botId}] /dm не удалось`);
+    return result.reason;
+  }
+
   getNearbyPlayers(botId: number): { offline: true } | { offline: false; text: string; count: number } {
     const session = this.sessions.get(botId);
     if (!session?.isActive || !session.isSpawned) return { offline: true };

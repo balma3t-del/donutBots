@@ -75,6 +75,7 @@ function botActionsKeyboard(bot: BotRecord, manager: SessionManager): InlineKeyb
     .row();
 
   if (status === 'online') {
+    kb.text('/dm + окно', `bot:${bot.id}:dm`).row();
     const clickerOn = manager.isClickerOn(bot.id);
     kb.text(clickerOn ? 'Выкл кликер ПКМ' : 'Вкл кликер ПКМ', `bot:${bot.id}:clicker`)
       .row();
@@ -279,6 +280,32 @@ export function registerPanel(bot: import('grammy').Bot<BotContext>, manager: Se
         .row()
         .text('« Назад', `bot:${id}`),
     );
+  });
+
+  bot.callbackQuery(/^bot:(\d+):dm$/, async (ctx) => {
+    if (!ensureAdmin(ctx)) return ctx.answerCallbackQuery({ text: 'Нет доступа' });
+    const id = Number(ctx.match![1]);
+    if (manager.getStatus(id) !== 'online') {
+      await ctx.answerCallbackQuery({ text: 'Бот оффлайн' });
+      return;
+    }
+    await ctx.answerCallbackQuery({ text: 'Пишу /dm...' });
+    void ctx.reply(`📨 [#${id}] Пишу <code>/dm</code>, жду окно...`, { parse_mode: 'HTML' });
+    const result = await manager.runDm(id);
+    const map = {
+      ok: 'Окно пришло в чат',
+      offline: 'Бот оффлайн',
+      timeout: 'Окно не открылось',
+      fail: 'Ошибка',
+    } as const;
+    const record = db.getBot(id);
+    if (record) {
+      await editOrReply(
+        ctx,
+        `${botCardText(record, manager)}\n\n/dm: <b>${map[result]}</b>`,
+        botActionsKeyboard(record, manager),
+      );
+    }
   });
 
   bot.callbackQuery(/^bot:(\d+):clicker$/, async (ctx) => {
