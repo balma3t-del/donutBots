@@ -153,8 +153,6 @@ export class BotSession extends EventEmitter {
   private dmRefreshInFlight = false;
   /** Последняя TG-отправка топ-10 (кнопку жмём чаще, чтобы GUI не закрыли). */
   private lastDmTgAt = 0;
-  /** Удержанное окно заказов (mineflayer иногда теряет currentWindow на close/open race). */
-  private dmOrdersWindow: import('prismarine-windows').Window | null = null;
 
   constructor(opts: BotSessionOptions) {
     super();
@@ -410,7 +408,10 @@ export class BotSession extends EventEmitter {
   /**
    * /dm → клик по золотому слитку → дамп следующего окна с предметами.
    */
-  async runDm(timeoutMs = 15_000): Promise<
+  async runDm(
+    timeoutMs = 15_000,
+    opts?: { quiet?: boolean },
+  ): Promise<
     { ok: true; text: string } | { ok: false; reason: 'offline' | 'timeout' | 'fail'; error?: string }
   > {
     const bot = this.bot;
@@ -444,7 +445,9 @@ export class BotSession extends EventEmitter {
       }
 
       logger.info(`[bot #${this.id}] click gold_ingot slot #${goldSlot}`);
-      void this.notify(`🪙 [#${this.id}] Жму золотой слиток (слот <code>${goldSlot}</code>)...`);
+      if (!opts?.quiet) {
+        void this.notify(`🪙 [#${this.id}] Жму золотой слиток (слот <code>${goldSlot}</code>)...`);
+      }
 
       const second = await this.waitForWindow(timeoutMs, async () => {
         // left click, normal mode
@@ -452,7 +455,14 @@ export class BotSession extends EventEmitter {
       }, { ignoreCurrent: true });
 
       await sleep(700);
-      let win = this.holdDmWindow(bot.currentWindow ?? second);
+      // close/open race: ждём стабильное currentWindow от сервера
+      for (let i = 0; i < 10 && !bot.currentWindow; i++) {
+        await sleep(200);
+      }
+      const win = bot.currentWindow ?? second;
+      if (!bot.currentWindow) {
+        logger.warn(`[bot #${this.id}] currentWindow empty after /dm orders open — using captured window`);
+      }
       const refreshSlot = findDmRefreshSlot(win);
       if (refreshSlot != null) {
         logger.info(`[bot #${this.id}] /dm refresh button slot #${refreshSlot}`);
@@ -466,13 +476,11 @@ export class BotSession extends EventEmitter {
         withLore: true,
       }).join('\n\n---\n\n');
 
-      // Сразу жмём «Обновить», чтобы сбросить idle-таймер FunTime.
-      if (refreshSlot != null) {
-        win = this.holdDmWindow(bot.currentWindow ?? win);
+      // Сразу жмём «Обновить», только если окно реально живое у mineflayer.
+      if (refreshSlot != null && bot.currentWindow) {
         try {
           await bot.clickWindow(refreshSlot, 0, 0);
           await sleep(800);
-          win = this.holdDmWindow(bot.currentWindow ?? win);
           logger.info(
             `[bot #${this.id}] initial refresh click #${refreshSlot}, window=${Boolean(bot.currentWindow)}`,
           );
@@ -500,14 +508,12 @@ export class BotSession extends EventEmitter {
     const bot = this.bot;
     if (!bot || !this.isActive) return { ok: false, reason: 'offline' };
 
-    const raw = bot.currentWindow ?? this.dmOrdersWindow;
-    if (!raw) {
+    let win = bot.currentWindow;
+    if (!win) {
       logger.info(`[bot #${this.id}] no window — full /dm reopen`);
-      this.dmOrdersWindow = null;
       return this.runDm();
     }
 
-    let win = this.holdDmWindow(raw);
     const refreshSlot = findDmRefreshSlot(win);
     if (refreshSlot == null) {
       const listed = listWindowItemNames(win);
@@ -516,26 +522,27 @@ export class BotSession extends EventEmitter {
         `⚠️ [#${this.id}] Кнопка обновления не найдена, переоткрываю /dm.\n`
         + `<code>${escapeHtml(listed.slice(0, 1200))}</code>`,
       );
-      this.dmOrdersWindow = null;
       return this.runDm();
     }
 
     try {
+      const prevId = (win as any)?.id;
       logger.info(`[bot #${this.id}] click refresh slot #${refreshSlot}`);
       await bot.clickWindow(refreshSlot, 0, 0);
-      // FunTime обычно обновляет слоты на месте; иногда шлёт close+open
-      await sleep(1_200);
-      win = this.holdDmWindow(bot.currentWindow ?? this.dmOrdersWindow ?? win);
+      // FunTime может обновить слоты на месте или прислать close+open
+      await sleep(800);
       if (!bot.currentWindow) {
         try {
-          win = this.holdDmWindow(
-            await this.waitForWindow(8_000, () => {}, { ignoreCurrent: false }),
-          );
+          win = await this.waitForWindow(8_000, () => {}, { ignoreCurrent: false });
         } catch {
           logger.warn(`[bot #${this.id}] window gone after refresh — full /dm reopen`);
-          this.dmOrdersWindow = null;
           return this.runDm();
         }
+      } else if ((bot.currentWindow as any)?.id !== prevId) {
+        await sleep(400);
+        win = bot.currentWindow;
+      } else {
+        win = bot.currentWindow;
       }
       const text = formatWindowDumpChunks(win, this.id, {
         header: `🗂 [#${this.id}] /dm обновлено кнопкой`,
@@ -548,22 +555,6 @@ export class BotSession extends EventEmitter {
       logger.error(`[bot #${this.id}] refresh click failed`, error);
       return { ok: false, reason: 'fail', error: msg };
     }
-  }
-
-  /** Сохраняет/восстанавливает currentWindow после race close/open. */
-  private holdDmWindow(
-    win: import('prismarine-windows').Window | null | undefined,
-  ): import('prismarine-windows').Window {
-    const bot = this.bot!;
-    if (!win) {
-      throw new Error('no dm window');
-    }
-    this.dmOrdersWindow = win;
-    if (!bot.currentWindow) {
-      logger.warn(`[bot #${this.id}] restore currentWindow id=${(win as any)?.id ?? '?'}`);
-      (bot as any).currentWindow = win;
-    }
-    return bot.currentWindow ?? win;
   }
 
   /** Ждёт открытия GUI. Если ignoreCurrent — игнорит уже открытое окно до нового. */
@@ -748,11 +739,11 @@ export class BotSession extends EventEmitter {
   private startDmRefresh() {
     this.stopDmRefresh();
     this.lastDmTgAt = Date.now();
-    logger.info(`[bot #${this.id}] /dm refresh button keep-alive 8s, TG every 20s`);
+    logger.info(`[bot #${this.id}] /dm refresh button keep-alive 5s, TG every 20s`);
     void this.notify(`🔁 [#${this.id}] Кнопка «Обновить» в /dm · топ-10 в TG каждые 20с`);
     this.dmRefreshTimer = setInterval(() => {
       void this.refreshDmOrders();
-    }, 8_000);
+    }, 5_000);
   }
 
   private stopDmRefresh() {
@@ -761,7 +752,6 @@ export class BotSession extends EventEmitter {
       this.dmRefreshTimer = null;
     }
     this.dmRefreshInFlight = false;
-    this.dmOrdersWindow = null;
   }
 
   private async refreshDmOrders() {
@@ -970,13 +960,6 @@ export class BotSession extends EventEmitter {
       logger.info(
         `[bot #${this.id}] windowClose id=${(window as any)?.id ?? '?'} title=${title.slice(0, 80) || '(none)'}`,
       );
-      if (
-        this.dmOrdersWindow
-        && (window as any)?.id != null
-        && (this.dmOrdersWindow as any)?.id === (window as any)?.id
-      ) {
-        this.dmOrdersWindow = null;
-      }
     });
 
     bot.on('messagestr', (msg) => {
