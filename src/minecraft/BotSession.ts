@@ -20,7 +20,7 @@ import type { ProxyConfig } from '../handlers/types.js';
 import { captchaEnabled, solveFuntimeCaptcha } from '../utils/captchaSolver.js';
 import { checkProxyWorking, hasProxy } from '../utils/proxy.js';
 import { logger } from '../utils/logger.js';
-import { findDmRefreshSlot, findGoldIngotSlot, formatWindowDumpChunks, listWindowItemNames } from './formatWindow.js';
+import { findDmRefreshSlot, findGoldIngotSlot, formatWindowDumpChunks, listWindowItemNames, stripMinecraftText } from './formatWindow.js';
 import { attachFuntimeAuth } from './funtimeAuth.js';
 
 const require = createRequire(import.meta.url);
@@ -454,12 +454,25 @@ export class BotSession extends EventEmitter {
         logger.info(`[bot #${this.id}] /dm refresh button slot #${refreshSlot}`);
       } else {
         logger.warn(`[bot #${this.id}] /dm refresh button not found yet`);
+        logger.warn(`[bot #${this.id}] slots:\n${listWindowItemNames(win)}`);
       }
       const text = formatWindowDumpChunks(win, this.id, {
         header: `🗂 [#${this.id}] После /dm → клик по золотому слитку`,
         dmOrders: true,
         withLore: true,
       }).join('\n\n---\n\n');
+
+      // FunTime закрывает простой idle-GUI — сразу «трогаем» кнопку обновления,
+      // чтобы окно осталось открытым до следующего тика.
+      if (refreshSlot != null && bot.currentWindow) {
+        try {
+          await bot.clickWindow(refreshSlot, 0, 0);
+          await sleep(800);
+          logger.info(`[bot #${this.id}] initial refresh click #${refreshSlot}, window=${Boolean(bot.currentWindow)}`);
+        } catch (e) {
+          logger.warn(`[bot #${this.id}] initial refresh click failed: ${String(e)}`);
+        }
+      }
 
       return { ok: true, text };
     } catch (error) {
@@ -913,6 +926,13 @@ export class BotSession extends EventEmitter {
       // без капчи можно сразу планировать режим
       if (!captchaEnabled()) this.captchaSolved = true;
       this.tryScheduleAn305();
+    });
+
+    bot.on('windowClose', (window) => {
+      const title = stripMinecraftText((window as any)?.title) || '';
+      logger.info(
+        `[bot #${this.id}] windowClose id=${(window as any)?.id ?? '?'} title=${title.slice(0, 80) || '(none)'}`,
+      );
     });
 
     bot.on('messagestr', (msg) => {
