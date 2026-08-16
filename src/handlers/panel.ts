@@ -71,7 +71,6 @@ function botActionsKeyboard(bot: BotRecord, manager: SessionManager): InlineKeyb
   }
   kb.row()
     .text('Отправить в чат', `bot:${bot.id}:chat`)
-    .text('Игроки рядом', `bot:${bot.id}:nearby`)
     .row();
 
   if (status === 'online') {
@@ -260,25 +259,6 @@ export function registerPanel(bot: import('grammy').Bot<BotContext>, manager: Se
       ctx,
       `Введи сообщение для чата Minecraft.\nМожно с / в начале (команда).\n/cancel — отмена`,
       new InlineKeyboard().text('« Назад', `bot:${id}`),
-    );
-  });
-
-  bot.callbackQuery(/^bot:(\d+):nearby$/, async (ctx) => {
-    if (!ensureAdmin(ctx)) return ctx.answerCallbackQuery({ text: 'Нет доступа' });
-    const id = Number(ctx.match![1]);
-    const result = manager.getNearbyPlayers(id);
-    if (result.offline) {
-      await ctx.answerCallbackQuery({ text: 'Бот оффлайн' });
-      return;
-    }
-    await ctx.answerCallbackQuery({ text: `Найдено: ${result.count}` });
-    await editOrReply(
-      ctx,
-      result.text,
-      new InlineKeyboard()
-        .text('Обновить список', `bot:${id}:nearby`)
-        .row()
-        .text('« Назад', `bot:${id}`),
     );
   });
 

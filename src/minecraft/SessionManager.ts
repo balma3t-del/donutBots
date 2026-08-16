@@ -93,13 +93,6 @@ export class SessionManager {
     return session.isActive ? 'ok' : 'offline';
   }
 
-  getNearbyPlayers(botId: number): { offline: true } | { offline: false; text: string; count: number } {
-    const session = this.sessions.get(botId);
-    if (!session?.isActive || !session.isSpawned) return { offline: true };
-    const list = session.getNearbyPlayers();
-    return { offline: false, text: session.formatNearbyList(), count: list.length };
-  }
-
   isClickerOn(botId: number): boolean {
     return Boolean(this.sessions.get(botId)?.isClickerOn);
   }

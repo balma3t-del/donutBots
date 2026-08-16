@@ -50,15 +50,6 @@ const MOVEMENT_PACKETS = new Set([
   'entity_action',
 ]);
 
-export type NearbyPlayer = {
-  username: string;
-  uuid?: string;
-  distance: number;
-  x: number;
-  y: number;
-  z: number;
-};
-
 export type NotifyFn = (text: string) => void | Promise<void>;
 
 export type BotSessionOptions = {
@@ -141,11 +132,7 @@ export class BotSession extends EventEmitter {
   bot: Bot | null = null;
   inGameName: string | null = null;
 
-  nearbyRadius = 64;
-  nearbyPlayers = new Map<string, string>();
-
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private nearbyScanTimer: ReturnType<typeof setInterval> | null = null;
   private clickerTimer: ReturnType<typeof setInterval> | null = null;
   private authTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
   private joinSpinToken = 0;
@@ -155,8 +142,10 @@ export class BotSession extends EventEmitter {
   private captchaSolving = false;
   private captchaSolved = false;
   private captchaHandler: InstanceType<typeof FlayerCaptcha> | null = null;
-  /** Уже делали авто /dm после входа. */
+  /** Уже делали авто /an305→/dm после входа. */
   private autoDmDone = false;
+  /** AuthMe /login прошёл. */
+  private serverAuthOk = false;
 
   constructor(opts: BotSessionOptions) {
     super();
@@ -208,7 +197,7 @@ export class BotSession extends EventEmitter {
     this.lastDisconnectReason = null;
     this.disconnectNotified = false;
     this.inGameName = null;
-    this.nearbyPlayers.clear();
+    this.serverAuthOk = false;
 
     const timeoutMin = Math.round(AUTH_TIMEOUT_MS / 60_000);
     void this.notify(
@@ -262,7 +251,6 @@ export class BotSession extends EventEmitter {
     this.joinSpinToken += 1;
     this.clearAuthTimeout();
     this.stopClicker(false);
-    this.stopNearbyScan();
     try {
       this.captchaHandler?.stop?.();
     } catch {
@@ -307,6 +295,7 @@ export class BotSession extends EventEmitter {
           logger.info(`[bot #${this.id}] captcha answer: ${ans}`);
           this.bot.chat(ans);
           void this.notify(`✅ [#${this.id}] Капча: <code>${escapeHtml(ans)}</code>`);
+          this.tryScheduleAn305();
         } catch (error) {
           logger.error(`[bot #${this.id}] captcha solve error`, error);
           void this.notify(`❌ [#${this.id}] Ошибка решения капчи`);
@@ -400,7 +389,7 @@ export class BotSession extends EventEmitter {
   /**
    * Пишет /dm, ждёт открытия GUI и возвращает текстовый дамп слотов.
    */
-  async runDm(timeoutMs = 12_000): Promise<
+  async runDm(timeoutMs = 15_000): Promise<
     { ok: true; text: string } | { ok: false; reason: 'offline' | 'timeout' | 'fail'; error?: string }
   > {
     const bot = this.bot;
@@ -418,33 +407,53 @@ export class BotSession extends EventEmitter {
 
       const dump = await new Promise<string>((resolve, reject) => {
         let settled = false;
-        const timer = setTimeout(() => {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          reject(new Error('timeout'));
-        }, timeoutMs);
 
-        const finish = async (window: import('prismarine-windows').Window) => {
-          if (settled) return;
-          // FunTime иногда шлёт слоты чуть позже open
-          await sleep(600);
+        const settleOk = (window: import('prismarine-windows').Window, via: string) => {
           if (settled) return;
           settled = true;
           cleanup();
+          logger.info(`[bot #${this.id}] window opened via ${via}`);
           resolve(formatWindowDump(window, this.id));
         };
 
+        const timer = setTimeout(() => {
+          if (settled) return;
+          // fallback: окно уже есть, но event пропустили
+          if (bot.currentWindow) {
+            settleOk(bot.currentWindow, 'currentWindow-timeout');
+            return;
+          }
+          settled = true;
+          cleanup();
+          logger.warn(`[bot #${this.id}] /dm window timeout`);
+          reject(new Error('timeout'));
+        }, timeoutMs);
+
+        const finish = async (window: import('prismarine-windows').Window, via: string) => {
+          await sleep(700);
+          if (settled) return;
+          const w = bot.currentWindow ?? window;
+          settleOk(w, via);
+        };
+
         const onOpen = (window: import('prismarine-windows').Window) => {
-          void finish(window);
+          void finish(window, 'windowOpen');
+        };
+
+        const onPacket = () => {
+          if (bot.currentWindow) void finish(bot.currentWindow, 'open_window packet');
         };
 
         const cleanup = () => {
           clearTimeout(timer);
           bot.removeListener('windowOpen', onOpen);
+          bot._client.removeListener('open_window', onPacket);
+          bot._client.removeListener('open_screen', onPacket);
         };
 
         bot.once('windowOpen', onOpen);
+        bot._client.on('open_window', onPacket);
+        bot._client.on('open_screen', onPacket);
         logger.info(`[bot #${this.id}] chat /dm`);
         bot.chat('/dm');
       });
@@ -458,7 +467,44 @@ export class BotSession extends EventEmitter {
     }
   }
 
-  /** Заход на режим /an305, пауза, затем /dm + дамп окна. */
+  /** Ждём следующий spawn (телепорт на режим) или таймаут. */
+  private waitNextSpawn(timeoutMs: number): Promise<boolean> {
+    const bot = this.bot;
+    if (!bot) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (ok: boolean) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        bot.removeListener('spawn', onSpawn);
+        resolve(ok);
+      };
+      const timer = setTimeout(() => finish(false), timeoutMs);
+      const onSpawn = () => finish(true);
+      bot.once('spawn', onSpawn);
+    });
+  }
+
+  /** Капча+логин готовы → /an305 → spawn → /dm. */
+  private tryScheduleAn305() {
+    if (this.autoDmDone || this.stopped) return;
+    if (!this.isSpawned || !this.isActive) return;
+    if (captchaEnabled() && !this.captchaSolved) {
+      logger.info(`[bot #${this.id}] wait captcha before /an305`);
+      return;
+    }
+
+    this.autoDmDone = true;
+    const delay = this.serverAuthOk ? 3_000 : 7_000;
+    logger.info(`[bot #${this.id}] schedule /an305 in ${delay}ms (authOk=${this.serverAuthOk})`);
+    setTimeout(() => {
+      if (this.stopped || !this.isActive || !this.isSpawned) return;
+      void this.runAn305ThenDm();
+    }, delay);
+  }
+
+  /** Заход на режим /an305, ждём телепорт, затем /dm + дамп окна. */
   async runAn305ThenDm() {
     const bot = this.bot;
     if (!bot || !this.isActive || !this.isSpawned) {
@@ -476,8 +522,9 @@ export class BotSession extends EventEmitter {
       return;
     }
 
-    // Ждём телепорт/загрузку режима
-    await sleep(8_000);
+    const gotSpawn = await this.waitNextSpawn(15_000);
+    logger.info(`[bot #${this.id}] after /an305 spawn=${gotSpawn}`);
+    await sleep(gotSpawn ? 2_500 : 5_000);
     if (this.stopped || !this.isActive) return;
 
     void this.notify(`📨 [#${this.id}] На /an305 — пишу <code>/dm</code>...`);
@@ -488,7 +535,7 @@ export class BotSession extends EventEmitter {
     }
     if (result.reason === 'timeout') {
       void this.notify(
-        `⏰ [#${this.id}] /dm после /an305: окно не открылось за 12с`,
+        `⏰ [#${this.id}] /dm после /an305: окно не открылось за 15с`,
       );
       return;
     }
@@ -509,10 +556,7 @@ export class BotSession extends EventEmitter {
       return;
     }
     if (result.reason === 'timeout') {
-      void this.notify(
-        `⏰ [#${this.id}] /dm: окно не открылось за 12с.\n`
-        + `Возможно ещё хаб/капча/логин — попробуй кнопку «/dm» позже.`,
-      );
+      void this.notify(`⏰ [#${this.id}] /dm: окно не открылось`);
       return;
     }
     void this.notify(
@@ -590,78 +634,6 @@ export class BotSession extends EventEmitter {
     } catch (error) {
       logger.warn(`[bot #${this.id}] RMB click failed`, error);
     }
-  }
-
-  getNearbyPlayers(radius = this.nearbyRadius): NearbyPlayer[] {
-    const bot = this.bot;
-    if (!bot?.entity?.position) return [];
-
-    const selfName = bot.username?.toLowerCase();
-    const origin = bot.entity.position;
-    const result: NearbyPlayer[] = [];
-    const seen = new Set<string>();
-
-    for (const player of Object.values(bot.players)) {
-      const username = player?.username;
-      if (!username || username.toLowerCase() === selfName) continue;
-      const entity = player.entity;
-      if (!entity?.position) continue;
-
-      const distance = origin.distanceTo(entity.position);
-      if (distance > radius) continue;
-
-      const key = username.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-
-      result.push({
-        username,
-        uuid: player.uuid,
-        distance: Math.round(distance * 10) / 10,
-        x: Math.round(entity.position.x * 10) / 10,
-        y: Math.round(entity.position.y * 10) / 10,
-        z: Math.round(entity.position.z * 10) / 10,
-      });
-    }
-
-    for (const entity of Object.values(bot.entities)) {
-      if (!entity || entity.type !== 'player') continue;
-      const username = entity.username;
-      if (!username || username.toLowerCase() === selfName) continue;
-      if (!entity.position) continue;
-
-      const key = username.toLowerCase();
-      if (seen.has(key)) continue;
-
-      const distance = origin.distanceTo(entity.position);
-      if (distance > radius) continue;
-      seen.add(key);
-
-      result.push({
-        username,
-        uuid: entity.uuid,
-        distance: Math.round(distance * 10) / 10,
-        x: Math.round(entity.position.x * 10) / 10,
-        y: Math.round(entity.position.y * 10) / 10,
-        z: Math.round(entity.position.z * 10) / 10,
-      });
-    }
-
-    result.sort((a, b) => a.distance - b.distance);
-    return result;
-  }
-
-  formatNearbyList(radius = this.nearbyRadius): string {
-    const list = this.getNearbyPlayers(radius);
-    if (list.length === 0) {
-      return `👁 [#${this.id}] Рядом никого (радиус ${radius})`;
-    }
-    const lines = list.map(
-      (p, i) =>
-        `${i + 1}. <b>${escapeHtml(p.username)}</b> — ${p.distance}м`
-        + ` <code>${p.x} ${p.y} ${p.z}</code>`,
-    );
-    return `👁 [#${this.id}] Игроки рядом (${list.length}, ≤${radius}м):\n${lines.join('\n')}`;
   }
 
   private async createProxyConnection(client: Client) {
@@ -743,37 +715,25 @@ export class BotSession extends EventEmitter {
       this.inGameName = bot.username;
       logger.info(`[bot #${this.id}] spawn @ ${bot.username}`);
       this.emit('spawn');
-      this.startNearbyScan();
-      setTimeout(() => {
-        void this.smoothSpin360();
-      }, 800 + Math.floor(Math.random() * 700));
-
-      // После входа: /an305 → /dm + дамп окна (один раз за сессию)
-      if (!this.autoDmDone) {
-        this.autoDmDone = true;
-        setTimeout(() => {
-          if (this.stopped || !this.isActive || !this.isSpawned) return;
-          void this.runAn305ThenDm();
-        }, 6_000);
-      }
+      // без капчи можно сразу планировать режим
+      if (!captchaEnabled()) this.captchaSolved = true;
+      this.tryScheduleAn305();
     });
 
-    bot.on('entitySpawn', (entity) => {
-      if (entity?.type === 'player' || entity?.username) {
-        this.refreshNearby();
-      }
-    });
-    bot.on('entityUpdate', (entity) => {
-      if (entity?.type === 'player' || entity?.username) {
-        this.refreshNearby();
-      }
-    });
-    bot.on('playerUpdated', () => {
-      this.refreshNearby();
-    });
-    bot.on('entityGone', (entity) => {
-      if (entity?.type === 'player' || entity?.username) {
-        this.refreshNearby();
+    bot.on('messagestr', (msg) => {
+      const textMsg = String(msg ?? '');
+      const low = textMsg.toLowerCase();
+      if (
+        low.includes('успешно')
+        || low.includes('авторизован')
+        || low.includes('добро пожаловать')
+        || low.includes('успешн')
+      ) {
+        if (!this.serverAuthOk) {
+          this.serverAuthOk = true;
+          logger.info(`[bot #${this.id}] server auth ok: ${textMsg.slice(0, 80)}`);
+          this.tryScheduleAn305();
+        }
       }
     });
 
@@ -801,7 +761,6 @@ export class BotSession extends EventEmitter {
       this.joinSpinToken += 1;
       this.clearAuthTimeout();
       this.stopClicker(false);
-      this.stopNearbyScan();
       this.isConnect = false;
       this.isActive = false;
       try {
@@ -832,53 +791,6 @@ export class BotSession extends EventEmitter {
     if (this.disconnectNotified) return;
     this.disconnectNotified = true;
     void this.notify(text);
-  }
-
-  private startNearbyScan() {
-    this.stopNearbyScan();
-    this.refreshNearby();
-    this.nearbyScanTimer = setInterval(() => this.refreshNearby(), 1_000);
-    logger.info(`[bot #${this.id}] nearby scan started (radius=${this.nearbyRadius})`);
-  }
-
-  private stopNearbyScan() {
-    if (this.nearbyScanTimer) {
-      clearInterval(this.nearbyScanTimer);
-      this.nearbyScanTimer = null;
-    }
-    this.nearbyPlayers.clear();
-  }
-
-  private refreshNearby() {
-    if (!this.bot?.entity?.position || !this.isSpawned || this.stopped) return;
-
-    const current = this.getNearbyPlayers();
-    const next = new Map<string, string>();
-
-    for (const p of current) {
-      const key = p.username.toLowerCase();
-      next.set(key, p.username);
-
-      if (this.nearbyPlayers.has(key)) continue;
-
-      const dist = p.distance.toFixed(1);
-      logger.info(`[bot #${this.id}] nearby detect ${p.username} dist=${dist}`);
-      void this.notify(
-        `👤 [#${this.id}] Обнаружен игрок <b>${escapeHtml(p.username)}</b>\n`
-        + `📏 Расстояние: <b>${dist}</b> м\n`
-        + `📍 <code>${p.x} ${p.y} ${p.z}</code>`,
-      );
-      this.emit('nearbyJoin', p.username, p);
-    }
-
-    for (const [key, name] of this.nearbyPlayers) {
-      if (!next.has(key)) {
-        logger.info(`[bot #${this.id}] nearby left ${name}`);
-        this.emit('nearbyLeave', name);
-      }
-    }
-
-    this.nearbyPlayers = next;
   }
 
   private scheduleReconnect() {
@@ -931,7 +843,6 @@ export class BotSession extends EventEmitter {
     this.clearAuthTimeout();
     this.stopClickerTimer();
     this.isClickerOn = false;
-    this.stopNearbyScan();
     this.isConnect = false;
     this.isActive = false;
     this.isSpawned = false;
