@@ -8,9 +8,9 @@ export type ProxyConfig = {
 export type BotRecord = {
   id: number;
   label: string;
-  /** Microsoft email (лицензия) */
+  /** Ник пиратки (колонка email в БД для совместимости). */
   email: string;
-  /** Microsoft password (опционально; иначе device-code) */
+  /** Пароль FunTime (/login /reg). */
   password: string;
   proxyHost: string;
   proxyPort: number;
@@ -25,10 +25,10 @@ export type BotRecord = {
 export type SessionStatus = 'offline' | 'connecting' | 'online';
 
 export type AwaitKind =
-  | 'add_email'
+  | 'add_nick'
   | 'add_password'
   | 'add_proxy'
-  | 'set_email'
+  | 'set_nick'
   | 'set_password'
   | 'set_proxy'
   | 'set_clicker_cps'
@@ -38,6 +38,6 @@ export type AwaitKind =
 export type SessionData = {
   awaitKind?: AwaitKind;
   awaitBotId?: number;
-  draftEmail?: string;
+  draftNick?: string;
   draftPassword?: string;
 };

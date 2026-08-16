@@ -62,7 +62,7 @@ main().catch((error) => {
   const desc = String((error as any)?.description ?? (error as any)?.message ?? error);
   if (desc.includes('409') || desc.includes('Conflict')) {
     logger.error(
-      'Не удалось стартовать TG: 409 Conflict. Останови все другие копии @donutmcbot и перезапусти.',
+      'Не удалось стартовать TG: 409 Conflict. Останови все другие копии этого BOT_TOKEN и перезапусти.',
     );
   } else {
     logger.error('fatal', error);

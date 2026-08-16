@@ -1,14 +1,11 @@
 services:
   bot:
     build: .
-    container_name: mcbot-panel
+    container_name: funtime-bot-panel
     restart: unless-stopped
     env_file:
       - .env
-    environment:
-      PROFILES_FOLDER: /app/data/profiles
     volumes:
       - ./data:/app/data
-    # Для device-code Microsoft auth удобно видеть логи
     stdin_open: true
     tty: true

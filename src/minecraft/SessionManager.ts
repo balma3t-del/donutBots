@@ -14,7 +14,7 @@ function toProxy(bot: BotRecord): ProxyConfig | null {
 }
 
 /**
- * Менеджер активных mineflayer-сессий.
+ * Менеджер активных mineflayer-сессий (FunTime / пиратка).
  */
 export class SessionManager {
   private sessions = new Map<number, BotSession>();
@@ -37,16 +37,16 @@ export class SessionManager {
     for (const id of botIds) {
       const session = this.sessions.get(id);
       if (session?.isActive) {
-        result.push(session.inGameName || session.email);
+        result.push(session.inGameName || session.nick);
       }
     }
     return result;
   }
 
-  async turnOn(botId: number): Promise<'ok' | 'already' | 'missing' | 'no_email'> {
+  async turnOn(botId: number): Promise<'ok' | 'already' | 'missing' | 'no_nick'> {
     const record = db.getBot(botId);
     if (!record) return 'missing';
-    if (!record.email.trim()) return 'no_email';
+    if (!record.email.trim()) return 'no_nick';
 
     const existing = this.sessions.get(botId);
     if (existing?.isActive || existing?.isConnect) return 'already';
@@ -57,7 +57,7 @@ export class SessionManager {
 
     const session = new BotSession({
       id: record.id,
-      email: record.email,
+      nick: record.email,
       password: record.password,
       proxy: toProxy(record),
       reconnect: record.reconnect,
@@ -118,7 +118,6 @@ export class SessionManager {
     return true;
   }
 
-  /** После обновления конфига — выключить, чтобы при следующем старте взялись новые данные. */
   invalidate(botId: number) {
     const session = this.sessions.get(botId);
     if (!session) return;
