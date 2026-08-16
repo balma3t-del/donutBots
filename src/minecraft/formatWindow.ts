@@ -123,6 +123,24 @@ function itemTitle(item: Item): string {
   return title;
 }
 
+/** Конец контейнера GUI (начало инвентаря игрока). */
+function containerEnd(window: Window): number {
+  const inv = (window as { inventoryStart?: number }).inventoryStart;
+  if (typeof inv === 'number' && inv > 0) return inv;
+  return Math.max(0, (window.slots?.length ?? 0) - 36);
+}
+
+function looksLikeRefreshControl(title: string, lore: string, name: string): boolean {
+  const blob = `${title} ${lore} ${name}`.toLowerCase();
+  return (
+    blob.includes('обнов')
+    || blob.includes('refresh')
+    || blob.includes('reload')
+    || blob.includes('перезагруз')
+    || blob.includes('актуализ')
+  );
+}
+
 export function findGoldIngotSlot(window: Window): number | null {
   const slots = window.slots ?? [];
   for (let i = 0; i < slots.length; i++) {
@@ -144,6 +162,56 @@ export function findGoldIngotSlot(window: Window): number | null {
   return null;
 }
 
+/** Кнопка обновления страницы ДонМаркета. */
+export function findDmRefreshSlot(window: Window): number | null {
+  const slots = window.slots ?? [];
+  const end = containerEnd(window);
+
+  // 1) явное имя/лор «обновить»
+  for (let i = 0; i < end; i++) {
+    const item = slots[i];
+    if (!item) continue;
+    const title = itemTitle(item);
+    const lore = itemLore(item).join(' ');
+    const name = item.name || '';
+    // лоты тоже могут содержать «обнов» в редких случаях — пропускаем с ценой
+    const parsed = extractPriceAndRatio(itemLore(item));
+    if (parsed.price || parsed.ratio) continue;
+    if (looksLikeRefreshControl(title, lore, name)) return i;
+  }
+
+  // 2) типичные иконки нижней панели без цены, с намёком в title/lore
+  for (let i = 0; i < end; i++) {
+    const item = slots[i];
+    if (!item) continue;
+    const parsed = extractPriceAndRatio(itemLore(item));
+    if (parsed.price || parsed.ratio) continue;
+    const name = (item.name || '').toLowerCase();
+    const title = itemTitle(item).toLowerCase();
+    const lore = itemLore(item).join(' ').toLowerCase();
+    const iconHint =
+      name === 'hopper'
+      || name === 'sunflower'
+      || name === 'clock'
+      || name === 'lime_dye'
+      || name === 'green_dye'
+      || name === 'emerald'
+      || name.includes('arrow')
+      || name === 'nether_star'
+      || name === 'structure_void'
+      || name === 'command_block'
+      || name === 'repeating_command_block'
+      || name === 'knowledge_book'
+      || name === 'writable_book'
+      || name === 'comparator'
+      || name === 'redstone';
+    if (!iconHint) continue;
+    if (looksLikeRefreshControl(title, lore, name)) return i;
+  }
+
+  return null;
+}
+
 export function listWindowItemNames(window: Window): string {
   const slots = window.slots ?? [];
   const lines: string[] = [];
@@ -159,7 +227,8 @@ export function listWindowItemNames(window: Window): string {
 export function formatDmOrdersDump(window: Window, botId: number): string[] {
   const title = stripMinecraftText((window as any).title) || 'ДонМаркет';
   const slots = window.slots ?? [];
-  const playerInvStart = Math.max(0, slots.length - 36);
+  const end = containerEnd(window);
+  const refreshSlot = findDmRefreshSlot(window);
 
   const debug: Array<{
     slot: number;
@@ -172,8 +241,7 @@ export function formatDmOrdersDump(window: Window, botId: number): string[] {
   }> = [];
   const lines: string[] = [];
 
-  for (let i = 0; i < slots.length; i++) {
-    if (i >= playerInvStart) continue;
+  for (let i = 0; i < end; i++) {
     const item = slots[i];
     if (!item) continue;
 
@@ -192,6 +260,7 @@ export function formatDmOrdersDump(window: Window, botId: number): string[] {
 
     // лот = есть цена (⚡) или курс
     if (!parsed.price && !parsed.ratio) continue;
+    if (lines.length >= 10) continue;
 
     lines.push(
       `<b>${escapeHtml(name)}</b>`
@@ -199,14 +268,25 @@ export function formatDmOrdersDump(window: Window, botId: number): string[] {
       + `\n📉 Соотношение: <code>${escapeHtml(parsed.ratio ?? '—')}</code>`
       + (parsed.coins ? `\n🪙 Монет: <code>${escapeHtml(parsed.coins)}</code>` : ''),
     );
-
-    if (lines.length >= 10) break;
   }
 
   try {
     const out = path.resolve('data', 'last-dm-orders.json');
     fs.mkdirSync(path.dirname(out), { recursive: true });
-    fs.writeFileSync(out, JSON.stringify({ title, items: debug }, null, 2));
+    fs.writeFileSync(
+      out,
+      JSON.stringify(
+        {
+          title,
+          inventoryStart: end,
+          refreshSlot,
+          slotsTotal: slots.length,
+          items: debug,
+        },
+        null,
+        2,
+      ),
+    );
   } catch {
     // ignore
   }
@@ -214,7 +294,8 @@ export function formatDmOrdersDump(window: Window, botId: number): string[] {
   const header = [
     `🗂 [#${botId}] /dm → топ-10 заказов`,
     `Окно: <b>${escapeHtml(title)}</b>`,
-    `Показано: <code>${lines.length}</code> · обновление каждые 20с`,
+    `Показано: <code>${lines.length}</code> · кнопка обновления каждые 20с`
+      + (refreshSlot != null ? ` (слот <code>${refreshSlot}</code>)` : ' (кнопка пока не найдена)'),
     '',
   ].join('\n');
 

@@ -20,7 +20,7 @@ import type { ProxyConfig } from '../handlers/types.js';
 import { captchaEnabled, solveFuntimeCaptcha } from '../utils/captchaSolver.js';
 import { checkProxyWorking, hasProxy } from '../utils/proxy.js';
 import { logger } from '../utils/logger.js';
-import { findGoldIngotSlot, formatWindowDumpChunks, listWindowItemNames } from './formatWindow.js';
+import { findDmRefreshSlot, findGoldIngotSlot, formatWindowDumpChunks, listWindowItemNames } from './formatWindow.js';
 import { attachFuntimeAuth } from './funtimeAuth.js';
 
 const require = createRequire(import.meta.url);
@@ -449,6 +449,12 @@ export class BotSession extends EventEmitter {
 
       await sleep(700);
       const win = bot.currentWindow ?? second;
+      const refreshSlot = findDmRefreshSlot(win);
+      if (refreshSlot != null) {
+        logger.info(`[bot #${this.id}] /dm refresh button slot #${refreshSlot}`);
+      } else {
+        logger.warn(`[bot #${this.id}] /dm refresh button not found yet`);
+      }
       const text = formatWindowDumpChunks(win, this.id, {
         header: `🗂 [#${this.id}] После /dm → клик по золотому слитку`,
         dmOrders: true,
@@ -460,6 +466,60 @@ export class BotSession extends EventEmitter {
       const msg = error instanceof Error ? error.message : String(error);
       if (msg === 'timeout') return { ok: false, reason: 'timeout' };
       logger.error(`[bot #${this.id}] runDm failed`, error);
+      return { ok: false, reason: 'fail', error: msg };
+    }
+  }
+
+  /**
+   * Обновление через кнопку в GUI (без повторного /dm).
+   * Если окна/кнопки нет — полный reopen.
+   */
+  async refreshDmViaButton(): Promise<
+    { ok: true; text: string } | { ok: false; reason: 'offline' | 'timeout' | 'fail'; error?: string }
+  > {
+    const bot = this.bot;
+    if (!bot || !this.isActive) return { ok: false, reason: 'offline' };
+
+    let win = bot.currentWindow;
+    if (!win) {
+      logger.info(`[bot #${this.id}] no window — full /dm reopen`);
+      return this.runDm();
+    }
+
+    const refreshSlot = findDmRefreshSlot(win);
+    if (refreshSlot == null) {
+      const listed = listWindowItemNames(win);
+      logger.warn(`[bot #${this.id}] refresh button missing — slots:\n${listed}`);
+      void this.notify(
+        `⚠️ [#${this.id}] Кнопка обновления не найдена, переоткрываю /dm.\n`
+        + `<code>${escapeHtml(listed.slice(0, 1200))}</code>`,
+      );
+      return this.runDm();
+    }
+
+    try {
+      logger.info(`[bot #${this.id}] click refresh slot #${refreshSlot}`);
+      await bot.clickWindow(refreshSlot, 0, 0);
+      // FunTime обычно обновляет слоты на месте
+      await sleep(1_500);
+      win = bot.currentWindow;
+      if (!win) {
+        try {
+          win = await this.waitForWindow(8_000, () => {}, { ignoreCurrent: false });
+        } catch {
+          logger.warn(`[bot #${this.id}] window gone after refresh — full /dm reopen`);
+          return this.runDm();
+        }
+      }
+      const text = formatWindowDumpChunks(win, this.id, {
+        header: `🗂 [#${this.id}] /dm обновлено кнопкой`,
+        dmOrders: true,
+        withLore: true,
+      }).join('\n\n---\n\n');
+      return { ok: true, text };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      logger.error(`[bot #${this.id}] refresh click failed`, error);
       return { ok: false, reason: 'fail', error: msg };
     }
   }
@@ -642,11 +702,11 @@ export class BotSession extends EventEmitter {
     );
   }
 
-  /** Каждые 20с заново открывает /dm → золотой слиток → топ-10. */
+  /** Каждые 20с жмёт кнопку обновления в /dm и шлёт топ-10. */
   private startDmRefresh() {
     this.stopDmRefresh();
-    logger.info(`[bot #${this.id}] /dm refresh every 20s`);
-    void this.notify(`🔁 [#${this.id}] Обновляю топ-10 /dm каждые 20с`);
+    logger.info(`[bot #${this.id}] /dm refresh button every 20s`);
+    void this.notify(`🔁 [#${this.id}] Жму кнопку обновления /dm каждые 20с`);
     this.dmRefreshTimer = setInterval(() => {
       void this.refreshDmOrders();
     }, 20_000);
@@ -664,8 +724,8 @@ export class BotSession extends EventEmitter {
     if (this.dmRefreshInFlight || this.stopped || !this.isActive || !this.isSpawned) return;
     this.dmRefreshInFlight = true;
     try {
-      logger.info(`[bot #${this.id}] /dm refresh tick`);
-      const result = await this.runDm();
+      logger.info(`[bot #${this.id}] /dm refresh tick (button)`);
+      const result = await this.refreshDmViaButton();
       if (result.ok) {
         void this.notify(result.text);
       } else {
