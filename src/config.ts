@@ -18,7 +18,7 @@ export const isAdmin = (userId: number): boolean => ADMIN_IDS.includes(userId);
 /** FunTime (пиратка / offline). */
 export const MC_HOST = process.env.MC_HOST?.trim() || 'mc.funtime.su';
 export const MC_PORT = Number(process.env.MC_PORT ?? 25565);
-export const MC_VERSION = process.env.MC_VERSION?.trim() || '1.21.4';
+export const MC_VERSION = process.env.MC_VERSION?.trim() || '1.21.11';
 
 export const RECONNECT_DELAY_MS = Number(process.env.RECONNECT_DELAY_MS ?? 5000);
 export const PROXY_DOWN_RECONNECT_MS = Number(process.env.PROXY_DOWN_RECONNECT_MS ?? 60_000);

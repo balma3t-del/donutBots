@@ -20,7 +20,7 @@ import type { ProxyConfig } from '../handlers/types.js';
 import { captchaEnabled, solveFuntimeCaptcha } from '../utils/captchaSolver.js';
 import { checkProxyWorking, hasProxy } from '../utils/proxy.js';
 import { logger } from '../utils/logger.js';
-import { formatWindowDump } from './formatWindow.js';
+import { formatWindowDumpChunks } from './formatWindow.js';
 import { attachFuntimeAuth } from './funtimeAuth.js';
 
 const require = createRequire(import.meta.url);
@@ -425,7 +425,7 @@ export class BotSession extends EventEmitter {
           settled = true;
           cleanup();
           logger.info(`[bot #${this.id}] window opened via ${via}`);
-          resolve(formatWindowDump(window, this.id));
+          resolve(formatWindowDumpChunks(window, this.id).join('\n\n---\n\n'));
         };
 
         const timer = setTimeout(() => {

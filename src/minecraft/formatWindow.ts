@@ -1,6 +1,8 @@
 import type { Window } from 'prismarine-windows';
 import type { Item } from 'prismarine-item';
 
+const TG_SAFE = 3500;
+
 function stripMinecraftText(value: unknown): string {
   if (value == null) return '';
   if (typeof value === 'string') {
@@ -26,22 +28,25 @@ function stripMinecraftText(value: unknown): string {
 function itemLine(slot: number, item: Item): string {
   const custom = item.customName ? stripMinecraftText(item.customName) : '';
   const display = stripMinecraftText(item.displayName) || item.name || 'unknown';
-  const title = custom || display;
+  // customName часто огромный JSON — режем
+  let title = (custom || display).replace(/\s+/g, ' ').trim();
+  if (title.length > 80) title = `${title.slice(0, 77)}...`;
   const count = item.count > 1 ? ` ×${item.count}` : '';
   return `#${slot}: <b>${escapeHtml(title)}</b>${count} <code>${escapeHtml(item.name)}</code>`;
 }
 
-export function formatWindowDump(window: Window, botId: number): string {
-  const title = stripMinecraftText((window as any).title) || 'без названия';
+/** Один или несколько кусков под лимит Telegram. */
+export function formatWindowDumpChunks(window: Window, botId: number): string[] {
+  const titleRaw = stripMinecraftText((window as any).title) || 'без названия';
+  const title = titleRaw.length > 120 ? `${titleRaw.slice(0, 117)}...` : titleRaw;
   const type = String((window as any).type ?? window.slots?.length ?? '?');
   const slots = window.slots ?? [];
 
-  const lines: string[] = [
+  const header = [
     `🗂 [#${botId}] Окно после <code>/an305</code> → <code>/dm</code>`,
     `Заголовок: <b>${escapeHtml(title)}</b>`,
     `Тип/id: <code>${escapeHtml(type)}</code>`,
     `Слотов: <code>${slots.length}</code>`,
-    '',
   ];
 
   const filled: string[] = [];
@@ -52,16 +57,26 @@ export function formatWindowDump(window: Window, botId: number): string {
   }
 
   if (filled.length === 0) {
-    lines.push('(пусто — слоты ещё не пришли или окно без предметов)');
-  } else {
-    lines.push(`Предметы (${filled.length}):`);
-    // Telegram message limit ~4096; keep dump reasonable
-    const max = 40;
-    lines.push(...filled.slice(0, max));
-    if (filled.length > max) lines.push(`…и ещё ${filled.length - max}`);
+    return [`${header.join('\n')}\n\n(пусто — слоты ещё не пришли или окно без предметов)`];
   }
 
-  return lines.join('\n');
+  const chunks: string[] = [];
+  let current = `${header.join('\n')}\n\nПредметы (${filled.length}):`;
+
+  for (const line of filled) {
+    if (current.length + line.length + 1 > TG_SAFE) {
+      chunks.push(current);
+      current = `🗂 [#${botId}] окно (продолжение)\n${line}`;
+    } else {
+      current += `\n${line}`;
+    }
+  }
+  chunks.push(current);
+  return chunks;
+}
+
+export function formatWindowDump(window: Window, botId: number): string {
+  return formatWindowDumpChunks(window, botId).join('\n\n');
 }
 
 function escapeHtml(text: string): string {

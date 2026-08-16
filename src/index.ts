@@ -7,14 +7,32 @@ import { SessionManager } from './minecraft/SessionManager.js';
 import { logger } from './utils/logger.js';
 
 async function notifyAdmins(text: string) {
+  const parts = splitTelegramHtml(text);
   for (const adminId of ADMIN_IDS) {
-    try {
-      await bot.api.sendMessage(adminId, text, { parse_mode: 'HTML' });
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      logger.warn(`notify admin ${adminId} failed: ${msg}`);
+    for (const part of parts) {
+      try {
+        await bot.api.sendMessage(adminId, part, { parse_mode: 'HTML' });
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        logger.warn(`notify admin ${adminId} failed: ${msg}`);
+      }
     }
   }
+}
+
+/** Режет длинные HTML-сообщения под лимит Telegram (~4096). */
+function splitTelegramHtml(text: string, max = 3500): string[] {
+  if (text.length <= max) return [text];
+  const chunks: string[] = [];
+  let rest = text;
+  while (rest.length > max) {
+    let cut = rest.lastIndexOf('\n', max);
+    if (cut < max * 0.5) cut = max;
+    chunks.push(rest.slice(0, cut));
+    rest = rest.slice(cut).replace(/^\n+/, '');
+  }
+  if (rest) chunks.push(rest);
+  return chunks;
 }
 
 const manager = new SessionManager(notifyAdmins);
