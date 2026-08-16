@@ -199,6 +199,8 @@ export function formatDmOrdersDump(window: Window, botId: number): string[] {
       + `\n📉 Соотношение: <code>${escapeHtml(parsed.ratio ?? '—')}</code>`
       + (parsed.coins ? `\n🪙 Монет: <code>${escapeHtml(parsed.coins)}</code>` : ''),
     );
+
+    if (lines.length >= 10) break;
   }
 
   try {
@@ -210,9 +212,9 @@ export function formatDmOrdersDump(window: Window, botId: number): string[] {
   }
 
   const header = [
-    `🗂 [#${botId}] /dm → заказы (цена + соотношение)`,
+    `🗂 [#${botId}] /dm → топ-10 заказов`,
     `Окно: <b>${escapeHtml(title)}</b>`,
-    `Лотов: <code>${lines.length}</code>`,
+    `Показано: <code>${lines.length}</code> · обновление каждые 20с`,
     '',
   ].join('\n');
 

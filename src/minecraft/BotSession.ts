@@ -148,6 +148,9 @@ export class BotSession extends EventEmitter {
   private serverAuthOk = false;
   /** Бот в хабе (можно /an*). */
   private hubReady = false;
+  /** Таймер обновления /dm заказов. */
+  private dmRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  private dmRefreshInFlight = false;
 
   constructor(opts: BotSessionOptions) {
     super();
@@ -196,6 +199,7 @@ export class BotSession extends EventEmitter {
     this.captchaSolved = false;
     this.autoDmDone = false;
     this.stopClickerTimer();
+    this.stopDmRefresh();
     this.lastDisconnectReason = null;
     this.disconnectNotified = false;
     this.inGameName = null;
@@ -254,6 +258,7 @@ export class BotSession extends EventEmitter {
     this.joinSpinToken += 1;
     this.clearAuthTimeout();
     this.stopClicker(false);
+    this.stopDmRefresh();
     try {
       this.captchaHandler?.stop?.();
     } catch {
@@ -622,6 +627,7 @@ export class BotSession extends EventEmitter {
 
     if (result.ok) {
       void this.notify(result.text);
+      this.startDmRefresh();
       return;
     }
     const hint = chatBuf.slice(-8).map(escapeHtml).join('\n') || '—';
@@ -636,11 +642,48 @@ export class BotSession extends EventEmitter {
     );
   }
 
+  /** Каждые 20с заново открывает /dm → золотой слиток → топ-10. */
+  private startDmRefresh() {
+    this.stopDmRefresh();
+    logger.info(`[bot #${this.id}] /dm refresh every 20s`);
+    void this.notify(`🔁 [#${this.id}] Обновляю топ-10 /dm каждые 20с`);
+    this.dmRefreshTimer = setInterval(() => {
+      void this.refreshDmOrders();
+    }, 20_000);
+  }
+
+  private stopDmRefresh() {
+    if (this.dmRefreshTimer) {
+      clearInterval(this.dmRefreshTimer);
+      this.dmRefreshTimer = null;
+    }
+    this.dmRefreshInFlight = false;
+  }
+
+  private async refreshDmOrders() {
+    if (this.dmRefreshInFlight || this.stopped || !this.isActive || !this.isSpawned) return;
+    this.dmRefreshInFlight = true;
+    try {
+      logger.info(`[bot #${this.id}] /dm refresh tick`);
+      const result = await this.runDm();
+      if (result.ok) {
+        void this.notify(result.text);
+      } else {
+        logger.warn(`[bot #${this.id}] /dm refresh failed: ${result.reason} ${result.error ?? ''}`);
+      }
+    } catch (error) {
+      logger.error(`[bot #${this.id}] /dm refresh error`, error);
+    } finally {
+      this.dmRefreshInFlight = false;
+    }
+  }
+
   async runDmAndNotify() {
     void this.notify(`📨 [#${this.id}] Пишу <code>/dm</code>...`);
     const result = await this.runDm();
     if (result.ok) {
       void this.notify(result.text);
+      this.startDmRefresh();
       return;
     }
     if (result.reason === 'offline') {
@@ -867,6 +910,7 @@ export class BotSession extends EventEmitter {
       this.joinSpinToken += 1;
       this.clearAuthTimeout();
       this.stopClicker(false);
+      this.stopDmRefresh();
       this.isConnect = false;
       this.isActive = false;
       try {
@@ -948,6 +992,7 @@ export class BotSession extends EventEmitter {
   clear() {
     this.clearAuthTimeout();
     this.stopClickerTimer();
+    this.stopDmRefresh();
     this.isClickerOn = false;
     this.isConnect = false;
     this.isActive = false;
