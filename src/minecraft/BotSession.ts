@@ -20,7 +20,7 @@ import type { ProxyConfig } from '../handlers/types.js';
 import { captchaEnabled, solveFuntimeCaptcha } from '../utils/captchaSolver.js';
 import { checkProxyWorking, hasProxy } from '../utils/proxy.js';
 import { logger } from '../utils/logger.js';
-import { formatWindowDumpChunks } from './formatWindow.js';
+import { findGoldIngotSlot, formatWindowDumpChunks, listWindowItemNames } from './formatWindow.js';
 import { attachFuntimeAuth } from './funtimeAuth.js';
 
 const require = createRequire(import.meta.url);
@@ -399,7 +399,7 @@ export class BotSession extends EventEmitter {
   }
 
   /**
-   * Пишет /dm, ждёт открытия GUI и возвращает текстовый дамп слотов.
+   * /dm → клик по золотому слитку → дамп следующего окна с предметами.
    */
   async runDm(timeoutMs = 15_000): Promise<
     { ok: true; text: string } | { ok: false; reason: 'offline' | 'timeout' | 'fail'; error?: string }
@@ -417,66 +417,116 @@ export class BotSession extends EventEmitter {
         await sleep(300);
       }
 
-      const dump = await new Promise<string>((resolve, reject) => {
-        let settled = false;
-
-        const settleOk = (window: import('prismarine-windows').Window, via: string) => {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          logger.info(`[bot #${this.id}] window opened via ${via}`);
-          resolve(formatWindowDumpChunks(window, this.id).join('\n\n---\n\n'));
-        };
-
-        const timer = setTimeout(() => {
-          if (settled) return;
-          // fallback: окно уже есть, но event пропустили
-          if (bot.currentWindow) {
-            settleOk(bot.currentWindow, 'currentWindow-timeout');
-            return;
-          }
-          settled = true;
-          cleanup();
-          logger.warn(`[bot #${this.id}] /dm window timeout`);
-          reject(new Error('timeout'));
-        }, timeoutMs);
-
-        const finish = async (window: import('prismarine-windows').Window, via: string) => {
-          await sleep(700);
-          if (settled) return;
-          const w = bot.currentWindow ?? window;
-          settleOk(w, via);
-        };
-
-        const onOpen = (window: import('prismarine-windows').Window) => {
-          void finish(window, 'windowOpen');
-        };
-
-        const onPacket = () => {
-          if (bot.currentWindow) void finish(bot.currentWindow, 'open_window packet');
-        };
-
-        const cleanup = () => {
-          clearTimeout(timer);
-          bot.removeListener('windowOpen', onOpen);
-          bot._client.removeListener('open_window', onPacket);
-          bot._client.removeListener('open_screen', onPacket);
-        };
-
-        bot.once('windowOpen', onOpen);
-        bot._client.on('open_window', onPacket);
-        bot._client.on('open_screen', onPacket);
+      const first = await this.waitForWindow(timeoutMs, () => {
         logger.info(`[bot #${this.id}] chat /dm`);
         bot.chat('/dm');
       });
 
-      return { ok: true, text: dump };
+      await sleep(500);
+      const goldSlot = findGoldIngotSlot(first);
+      if (goldSlot == null) {
+        const listed = listWindowItemNames(first);
+        logger.warn(`[bot #${this.id}] gold_ingot not found in /dm window`);
+        return {
+          ok: false,
+          reason: 'fail',
+          error: `золотой слиток не найден\n${listed}`,
+        };
+      }
+
+      logger.info(`[bot #${this.id}] click gold_ingot slot #${goldSlot}`);
+      void this.notify(`🪙 [#${this.id}] Жму золотой слиток (слот <code>${goldSlot}</code>)...`);
+
+      const second = await this.waitForWindow(timeoutMs, async () => {
+        // left click, normal mode
+        await bot.clickWindow(goldSlot, 0, 0);
+      }, { ignoreCurrent: true });
+
+      await sleep(700);
+      const win = bot.currentWindow ?? second;
+      const text = formatWindowDumpChunks(win, this.id, {
+        header: `🗂 [#${this.id}] После /dm → клик по золотому слитку`,
+        withLore: true,
+      }).join('\n\n---\n\n');
+
+      return { ok: true, text };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       if (msg === 'timeout') return { ok: false, reason: 'timeout' };
       logger.error(`[bot #${this.id}] runDm failed`, error);
       return { ok: false, reason: 'fail', error: msg };
     }
+  }
+
+  /** Ждёт открытия GUI. Если ignoreCurrent — игнорит уже открытое окно до нового. */
+  private waitForWindow(
+    timeoutMs: number,
+    trigger: () => void | Promise<void>,
+    opts?: { ignoreCurrent?: boolean },
+  ): Promise<import('prismarine-windows').Window> {
+    const bot = this.bot!;
+    const prevId = opts?.ignoreCurrent ? (bot.currentWindow as any)?.id : null;
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+
+      const settleOk = (window: import('prismarine-windows').Window, via: string) => {
+        if (settled) return;
+        if (opts?.ignoreCurrent && (window as any)?.id === prevId) return;
+        settled = true;
+        cleanup();
+        logger.info(`[bot #${this.id}] window opened via ${via}`);
+        resolve(window);
+      };
+
+      const timer = setTimeout(() => {
+        if (settled) return;
+        const cur = bot.currentWindow;
+        if (cur && (!opts?.ignoreCurrent || (cur as any).id !== prevId)) {
+          settleOk(cur, 'currentWindow-timeout');
+          return;
+        }
+        settled = true;
+        cleanup();
+        logger.warn(`[bot #${this.id}] window timeout`);
+        reject(new Error('timeout'));
+      }, timeoutMs);
+
+      const finish = async (window: import('prismarine-windows').Window, via: string) => {
+        await sleep(500);
+        if (settled) return;
+        const w = bot.currentWindow ?? window;
+        settleOk(w, via);
+      };
+
+      const onOpen = (window: import('prismarine-windows').Window) => {
+        void finish(window, 'windowOpen');
+      };
+
+      const onPacket = () => {
+        if (!bot.currentWindow) return;
+        if (opts?.ignoreCurrent && (bot.currentWindow as any).id === prevId) return;
+        void finish(bot.currentWindow, 'open_window packet');
+      };
+
+      const cleanup = () => {
+        clearTimeout(timer);
+        bot.removeListener('windowOpen', onOpen);
+        bot._client.removeListener('open_window', onPacket);
+        bot._client.removeListener('open_screen', onPacket);
+      };
+
+      bot.on('windowOpen', onOpen);
+      bot._client.on('open_window', onPacket);
+      bot._client.on('open_screen', onPacket);
+
+      void Promise.resolve(trigger()).catch((err) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(err);
+      });
+    });
   }
 
   /** Ждём следующий spawn (телепорт на режим) или таймаут. */
@@ -581,7 +631,7 @@ export class BotSession extends EventEmitter {
       return;
     }
     void this.notify(
-      `❌ [#${this.id}] /dm ошибка: <code>${escapeHtml(result.error ?? result.reason)}</code>`,
+      `❌ [#${this.id}] /dm ошибка:\n<code>${escapeHtml((result.error ?? result.reason).slice(0, 800))}</code>`,
     );
   }
 

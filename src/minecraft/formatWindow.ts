@@ -3,7 +3,7 @@ import type { Item } from 'prismarine-item';
 
 const TG_SAFE = 3500;
 
-function stripMinecraftText(value: unknown): string {
+export function stripMinecraftText(value: unknown): string {
   if (value == null) return '';
   if (typeof value === 'string') {
     return value.replace(/§[0-9a-fk-or]/gi, '').trim();
@@ -16,6 +16,7 @@ function stripMinecraftText(value: unknown): string {
     if (Array.isArray(obj.extra)) out += obj.extra.map(stripMinecraftText).join('');
     return out.replace(/§[0-9a-fk-or]/gi, '').trim();
   }
+  if (Array.isArray(obj.extra)) return obj.extra.map(stripMinecraftText).join('');
   if (obj.translate) return String(obj.translate);
   if (obj.value != null) return stripMinecraftText(obj.value);
   try {
@@ -25,25 +26,78 @@ function stripMinecraftText(value: unknown): string {
   }
 }
 
-function itemLine(slot: number, item: Item): string {
-  const custom = item.customName ? stripMinecraftText(item.customName) : '';
-  const display = stripMinecraftText(item.displayName) || item.name || 'unknown';
-  // customName часто огромный JSON — режем
-  let title = (custom || display).replace(/\s+/g, ' ').trim();
-  if (title.length > 80) title = `${title.slice(0, 77)}...`;
-  const count = item.count > 1 ? ` ×${item.count}` : '';
-  return `#${slot}: <b>${escapeHtml(title)}</b>${count} <code>${escapeHtml(item.name)}</code>`;
+function itemLore(item: Item): string[] {
+  const lore = (item as any).lore;
+  if (!Array.isArray(lore)) return [];
+  return lore
+    .map((line: unknown) => stripMinecraftText(line).replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .slice(0, 12);
 }
 
-/** Один или несколько кусков под лимит Telegram. */
-export function formatWindowDumpChunks(window: Window, botId: number): string[] {
+function itemLine(slot: number, item: Item, withLore: boolean): string {
+  const custom = item.customName ? stripMinecraftText(item.customName) : '';
+  const display = stripMinecraftText(item.displayName) || item.name || 'unknown';
+  let title = (custom || display).replace(/\s+/g, ' ').trim();
+  if (title.length > 100) title = `${title.slice(0, 97)}...`;
+  const count = item.count > 1 ? ` ×${item.count}` : '';
+  let line = `#${slot}: <b>${escapeHtml(title)}</b>${count} <code>${escapeHtml(item.name)}</code>`;
+  if (withLore) {
+    const lore = itemLore(item);
+    if (lore.length) {
+      line += `\n   ${lore.map((l) => escapeHtml(l)).join(' · ')}`;
+    }
+  }
+  return line;
+}
+
+export function findGoldIngotSlot(window: Window): number | null {
+  const slots = window.slots ?? [];
+  for (let i = 0; i < slots.length; i++) {
+    const item = slots[i];
+    if (!item) continue;
+    const name = (item.name || '').toLowerCase();
+    const custom = stripMinecraftText(item.customName).toLowerCase();
+    const display = stripMinecraftText(item.displayName).toLowerCase();
+    if (
+      name === 'gold_ingot'
+      || name.includes('gold_ingot')
+      || custom.includes('золот')
+      || display.includes('золот')
+      || display.includes('gold ingot')
+    ) {
+      return i;
+    }
+  }
+  return null;
+}
+
+/** Список слотов для отладки, если слиток не найден. */
+export function listWindowItemNames(window: Window): string {
+  const slots = window.slots ?? [];
+  const lines: string[] = [];
+  for (let i = 0; i < slots.length; i++) {
+    const item = slots[i];
+    if (!item) continue;
+    const title = stripMinecraftText(item.customName) || stripMinecraftText(item.displayName) || item.name;
+    lines.push(`#${i} ${item.name} | ${title}`.slice(0, 120));
+  }
+  return lines.slice(0, 30).join('\n') || '(пусто)';
+}
+
+export function formatWindowDumpChunks(
+  window: Window,
+  botId: number,
+  opts?: { header?: string; withLore?: boolean },
+): string[] {
   const titleRaw = stripMinecraftText((window as any).title) || 'без названия';
   const title = titleRaw.length > 120 ? `${titleRaw.slice(0, 117)}...` : titleRaw;
   const type = String((window as any).type ?? window.slots?.length ?? '?');
   const slots = window.slots ?? [];
+  const withLore = opts?.withLore ?? true;
 
   const header = [
-    `🗂 [#${botId}] Окно после <code>/an305</code> → <code>/dm</code>`,
+    opts?.header ?? `🗂 [#${botId}] Окно`,
     `Заголовок: <b>${escapeHtml(title)}</b>`,
     `Тип/id: <code>${escapeHtml(type)}</code>`,
     `Слотов: <code>${slots.length}</code>`,
@@ -53,7 +107,7 @@ export function formatWindowDumpChunks(window: Window, botId: number): string[] 
   for (let i = 0; i < slots.length; i++) {
     const item = slots[i];
     if (!item) continue;
-    filled.push(itemLine(i, item));
+    filled.push(itemLine(i, item, withLore));
   }
 
   if (filled.length === 0) {
@@ -73,10 +127,6 @@ export function formatWindowDumpChunks(window: Window, botId: number): string[] 
   }
   chunks.push(current);
   return chunks;
-}
-
-export function formatWindowDump(window: Window, botId: number): string {
-  return formatWindowDumpChunks(window, botId).join('\n\n');
 }
 
 function escapeHtml(text: string): string {
