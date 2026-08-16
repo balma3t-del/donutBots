@@ -446,6 +446,7 @@ export class BotSession extends EventEmitter {
       const win = bot.currentWindow ?? second;
       const text = formatWindowDumpChunks(win, this.id, {
         header: `🗂 [#${this.id}] После /dm → клик по золотому слитку`,
+        dmOrders: true,
         withLore: true,
       }).join('\n\n---\n\n');
 
